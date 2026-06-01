@@ -12,7 +12,10 @@ def TritonToStructured : Pass<"triton-to-structured", "mlir::ModuleOp"> {
             "If enabled, select will perform a fallback conversion when mask matching fails.">,
         Option<"optimizeDynamicOffset", "optimize-dynamic-offset",
             "bool", /*default*/"false",
-            "Enable dynamic offset feature">
+            "Enable dynamic offset feature">,
+        Option<"preserveDebugLocs", "preserve-debug-locs",
+            "bool", /*default*/"false",
+            "preserve debug-friendly IR by skipping cleanup optimizations">
     ];
 }
 

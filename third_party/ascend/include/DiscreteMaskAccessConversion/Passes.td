@@ -20,7 +20,10 @@ def DiscreteMaskAccessConversion : Pass<"discrete-mask-access-conversion", "mlir
         "force to use simt template">,
     Option<"enableSyncBlockLock", "enable-sync-block-lock",
         "bool", /*default*/"true",
-        "enable sync block lock/unlock in store">
+        "enable sync block lock/unlock in store">,
+    Option<"preserveDebugLocs", "preserve-debug-locs",
+        "bool", /*default*/"false",
+        "preserve debug-friendly IR by skipping cleanup optimizations">
   ];
 }
 

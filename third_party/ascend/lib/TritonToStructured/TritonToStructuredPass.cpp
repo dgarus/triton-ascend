@@ -147,8 +147,11 @@ void TritonToStructuredPass::runOnOperation() {
   }
 
   PassManager pm(&getContext(), moduleOp.getOperationName());
-  pm.addPass(createCSEPass());
-  pm.addPass(createCanonicalizerPass());
+  // Disable optimizations for the Debug mode
+  if (!preserveDebugLocs) {
+    pm.addPass(createCSEPass());
+    pm.addPass(createCanonicalizerPass());
+  }
   if (failed(runPipeline(pm, getOperation()))) {
     moduleOp->emitWarning("Canonicalize failed");
   }
@@ -161,7 +164,9 @@ triton::createTritonToStructuredPass() {
 
 std::unique_ptr<OperationPass<ModuleOp>>
 triton::createTritonToStructuredPass(bool enableMaskFallbackConversion,
-                                     bool optimizeDynamicOffset) {
+                                     bool optimizeDynamicOffset,
+                                     bool preserveDebugLocs) {
   return std::make_unique<TritonToStructuredPass>(enableMaskFallbackConversion,
-                                                  optimizeDynamicOffset);
+                                                  optimizeDynamicOffset,
+                                                  preserveDebugLocs);
 }

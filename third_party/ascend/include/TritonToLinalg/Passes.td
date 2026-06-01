@@ -21,7 +21,10 @@ def TritonToLinalg : Pass<"triton-to-linalg", "mlir::ModuleOp"> {
             "enable select analysis">,
         Option<"compileOn91095", "compile-on-910-95",
             "bool", /*default*/"false",
-            "compile on 910_95">
+            "compile on 910_95">,
+        Option<"preserveDebugLocs", "preserve-debug-locs",
+            "bool", /*default*/"false",
+            "preserve debug-friendly IR by skipping cleanup optimizations">
     ];
 }
 

@@ -37,6 +37,7 @@ namespace triton {
 std::unique_ptr<OperationPass<ModuleOp>> createTritonToStructuredPass();
 
 std::unique_ptr<OperationPass<ModuleOp>> createTritonToStructuredPass(bool,
+                                                                      bool,
                                                                       bool);
 
 } // namespace triton
@@ -51,9 +52,10 @@ public:
   TritonToStructuredPass() = default;
 
   TritonToStructuredPass(bool enableMaskFallbackConversion,
-                         bool optimizeDynamicOffset) {
+                         bool optimizeDynamicOffset, bool preserveDebugLocs) {
     this->enableMaskFallbackConversion = enableMaskFallbackConversion;
     this->optimizeDynamicOffset = optimizeDynamicOffset;
+    this->preserveDebugLocs = preserveDebugLocs;
   };
   void getDependentDialects(DialectRegistry &registry) const override;
   void runOnOperation() override;

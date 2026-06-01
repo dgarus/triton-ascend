@@ -80,9 +80,13 @@ def make_ttir(mod, metadata, opt):
     pm.enable_debug()
     passes.common.add_inliner(pm)
     passes.ttir.add_combine(pm)
-    passes.common.add_canonicalizer(pm)
+    # Disable optimizations for the Debug mode
+    if not opt.debug:
+        passes.common.add_canonicalizer(pm)
     passes.ttir.add_reorder_broadcast(pm)
-    passes.common.add_cse(pm)
+    # Disable optimizations for the Debug mode
+    if not opt.debug:
+        passes.common.add_cse(pm)
     passes.common.add_licm(pm)
     passes.common.add_symbol_dce(pm)
     passes.ttir.add_loop_unroll(pm)
@@ -117,28 +121,34 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
             auto_blockify_size = 1
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        ascend.passes.ttir.add_auto_blockify(pm, auto_blockify_size)
+        ascend.passes.ttir.add_auto_blockify(pm, auto_blockify_size, opt.debug)
         if (metadata["add_auto_scheduling"]):
             ascend.passes.ttir.add_dag_sync(pm)
             ascend.passes.ttir.add_dag_scope(pm)
-            passes.common.add_cse(pm)
-            passes.common.add_canonicalizer(pm)
+            # Disable optimizations for the Debug mode
+            if (not opt.debug):
+                passes.common.add_cse(pm)
+                passes.common.add_canonicalizer(pm)
             ascend.passes.ttir.add_dag_ssbuffer(pm)
-            passes.common.add_cse(pm)
-            passes.common.add_canonicalizer(pm)
+            # Disable optimizations for the Debug mode
+            if (not opt.debug):
+                passes.common.add_cse(pm)
+                passes.common.add_canonicalizer(pm)
 
-        ascend.passes.ttir.add_triton_to_structure(pm, enable_mask_fallback_conversion, optimize_dynamic_offset)
+        ascend.passes.ttir.add_triton_to_structure(pm, enable_mask_fallback_conversion, optimize_dynamic_offset,
+                                                   opt.debug)
         ascend.passes.ttir.add_discrete_mask_access_conversion(pm, compile_on_910_95, force_simt_template,
-                                                               enable_sync_block_lock)
+                                                               enable_sync_block_lock, opt.debug)
         ascend.passes.ttir.add_triton_to_annotation(pm)
-        ascend.passes.ttir.add_triton_to_unstructure(pm, compile_on_910_95, force_simt_template)
+        ascend.passes.ttir.add_triton_to_unstructure(pm, compile_on_910_95, force_simt_template, opt.debug)
         ascend.passes.ttir.add_triton_to_hivm(pm)
         ascend.passes.ttir.add_triton_to_hfusion(pm)
         ascend.passes.ttir.add_triton_to_llvm(pm)
-        ascend.passes.ttir.add_bubble_up_operation(pm)
-        ascend.passes.ttir.add_triton_to_structure(pm, enable_mask_fallback_conversion, optimize_dynamic_offset)
+        ascend.passes.ttir.add_bubble_up_operation(pm, opt.debug)
+        ascend.passes.ttir.add_triton_to_structure(pm, enable_mask_fallback_conversion, optimize_dynamic_offset,
+                                                   opt.debug)
         ascend.passes.ttir.add_triton_to_linalg(pm, False, named_ops, enable_nd2nz_on_vector, enable_select_analysis,
-                                                compile_on_910_95)
+                                                compile_on_910_95, opt.debug)
         if metadata["enable_dynamic_cv_pipeline"]:
             ascend.passes.ttir.add_dynamic_cv_pipeline(pm, compile_on_910_95)
 

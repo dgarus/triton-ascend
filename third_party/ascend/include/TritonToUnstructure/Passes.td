@@ -14,7 +14,10 @@ def TritonToUnstructure : Pass<"triton-to-unstructure", "mlir::ModuleOp"> {
             "compile on 910_95">,
         Option<"forceSimtTemplate", "force-simt-template",
             "bool", /*default*/"false",
-            "force to use simt template">
+            "force to use simt template">,
+        Option<"preserveDebugLocs", "preserve-debug-locs",
+            "bool", /*default*/"false",
+            "preserve debug-friendly IR by skipping cleanup optimizations">
     ];
 }
 
@@ -24,6 +27,8 @@ def BubbleUpOperation : Pass<"bubble-up-operation", "mlir::ModuleOp"> {
     let options = [
         Option<"enableAggressiveMode", "enable-aggressive-mode", "bool", "true",
            "Enable aggressive bubble up operation.">,
+        Option<"preserveDebugLocs", "preserve-debug-locs", "bool", "false",
+           "preserve debug-friendly IR by skipping cleanup optimizations">,
     ];
 }
 

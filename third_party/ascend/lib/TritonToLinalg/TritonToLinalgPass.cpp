@@ -771,8 +771,11 @@ TritonToLinalgPass::processImplicitPermuteOperations(ModuleOp moduleOp) {
   }
 
   mlir::PassManager pm(&getContext(), moduleOp.getOperationName());
-  pm.addPass(createCSEPass());
-  pm.addPass(createCanonicalizerPass());
+  // Disable optimizations for the Debug mode
+  if (!preserveDebugLocs) {
+    pm.addPass(createCSEPass());
+    pm.addPass(createCanonicalizerPass());
+  }
   return runPipeline(pm, getOperation());
 }
 
@@ -870,8 +873,11 @@ void TritonToLinalgPass::runOnOperation() {
   // so runUseAnalysis won't walk dead ops with missing lattice states.
   {
     PassManager pm(&getContext(), moduleOp.getOperationName());
-    pm.addPass(createCSEPass());
-    pm.addPass(createCanonicalizerPass());
+    // Disable optimizations for the Debug mode
+    if (!preserveDebugLocs) {
+      pm.addPass(createCSEPass());
+      pm.addPass(createCanonicalizerPass());
+    }
     if (failed(runPipeline(pm, moduleOp))) {
       moduleOp->emitError(
           "failed to pre-clean dead control-flow before use analysis");
@@ -953,8 +959,11 @@ void TritonToLinalgPass::runOnOperation() {
 
   // 9. Clean up dead code and simplify IR.
   PassManager pm(&getContext(), moduleOp.getOperationName());
-  pm.addPass(createCSEPass());
-  pm.addPass(createCanonicalizerPass());
+  // Disable optimizations for the Debug mode
+  if (!preserveDebugLocs) {
+    pm.addPass(createCSEPass());
+    pm.addPass(createCanonicalizerPass());
+  }
   if (failed(runPipeline(pm, getOperation()))) {
     signalPassFailure();
   }
@@ -1168,10 +1177,10 @@ void TritonToLinalgPass::runOnOperation() {
 
 std::unique_ptr<OperationPass<ModuleOp>> triton::createTritonToLinalgPass(
     bool globalKernel, bool namedOps, bool enableNd2nzOnVector,
-    bool enableSelectAnalysis, bool compileOn91095) {
+    bool enableSelectAnalysis, bool compileOn91095, bool preserveDebugLocs) {
   return std::make_unique<TritonToLinalgPass>(
       globalKernel, namedOps, enableNd2nzOnVector, enableSelectAnalysis,
-      compileOn91095);
+      compileOn91095, preserveDebugLocs);
 }
 
 std::unique_ptr<OperationPass<ModuleOp>> triton::createTritonToLinalgPass() {

@@ -333,17 +333,20 @@ void init_triton_ascend_ir(py::module &&m) {
 }
 
 void init_triton_ascend_passes_ttir(py::module &&m) {
-  m.def("add_auto_blockify", [](mlir::PassManager &pm, int autoBlockifySize) {
+  m.def("add_auto_blockify", [](mlir::PassManager &pm, int autoBlockifySize,
+                                bool preserveDebugLocs) {
     AutoBlockifyOptions opts;
     opts.autoBlockifySize = autoBlockifySize;
+    opts.preserveDebugLocs = preserveDebugLocs;
     pm.addPass(mlir::triton::createAutoBlockifyPass(opts));
   });
 
   m.def("add_triton_to_structure",
         [](mlir::PassManager &pm, bool enableMaskFallbackConversion,
-           bool optimizeDynamicOffset) {
+           bool optimizeDynamicOffset, bool preserveDebugLocs) {
           pm.addPass(mlir::triton::createTritonToStructuredPass(
-              enableMaskFallbackConversion, optimizeDynamicOffset));
+              enableMaskFallbackConversion, optimizeDynamicOffset,
+              preserveDebugLocs));
         });
 
   m.def("add_triton_to_annotation", [](mlir::PassManager &pm) {
@@ -353,17 +356,19 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
   m.def("add_triton_to_linalg",
         [](mlir::PassManager &pm, bool globalKernel, bool namedOps,
            bool enableNd2nzOnVector, bool enableSelectAnalysis,
-           bool compileOn91095) {
+           bool compileOn91095, bool preserveDebugLocs) {
           pm.addPass(mlir::triton::createTritonToLinalgPass(
               globalKernel, namedOps, enableNd2nzOnVector, enableSelectAnalysis,
-              compileOn91095));
+              compileOn91095, preserveDebugLocs));
         });
 
   m.def("add_triton_to_unstructure",
-        [](mlir::PassManager &pm, bool compileOn91095, bool forceSimtTemplate) {
+        [](mlir::PassManager &pm, bool compileOn91095, bool forceSimtTemplate,
+           bool preserveDebugLocs) {
           TritonToUnstructureOptions opts;
           opts.compileOn91095 = compileOn91095;
           opts.forceSimtTemplate = forceSimtTemplate;
+          opts.preserveDebugLocs = preserveDebugLocs;
           pm.addPass(mlir::triton::createTritonToUnstructurePass(opts));
         });
 
@@ -374,11 +379,13 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
   m.def("add_discrete_mask_access_conversion", [](mlir::PassManager &pm,
                                                   bool compileOn91095,
                                                   bool forceSimtTemplate,
-                                                  bool enableSyncBlockLock) {
+                                                  bool enableSyncBlockLock,
+                                                  bool preserveDebugLocs) {
     DiscreteMaskAccessConversionOptions opts;
     opts.compileOn91095 = compileOn91095;
     opts.forceSimtTemplate = forceSimtTemplate;
     opts.enableSyncBlockLock = enableSyncBlockLock;
+    opts.preserveDebugLocs = preserveDebugLocs;
     pm.addPass(mlir::triton::createDiscreteMaskAccessConversionPass(opts));
   });
 
@@ -390,8 +397,11 @@ void init_triton_ascend_passes_ttir(py::module &&m) {
     pm.addPass(mlir::triton::createTritonToLLVMPass());
   });
 
-  m.def("add_bubble_up_operation", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::triton::createBubbleUpOperationPass());
+  m.def("add_bubble_up_operation", [](mlir::PassManager &pm,
+                                      bool preserveDebugLocs) {
+    BubbleUpOperationOptions opts;
+    opts.preserveDebugLocs = preserveDebugLocs;
+    pm.addPass(mlir::triton::createBubbleUpOperationPass(opts));
   });
 
   m.def("add_dynamic_cv_pipeline",
