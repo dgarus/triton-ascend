@@ -66,11 +66,9 @@ module {
 // CHECK-SAME: triton.debug_line.class = "control"
 // CHECK-SAME: loc(#[[$CONTROL_BR_LOC:[A-Za-z0-9_]+]])
 // CHECK: scf.if
-// CHECK-SAME: triton.debug_line.class = "control"
-// CHECK-SAME: loc(#[[$CONTROL_IF_LOC:[A-Za-z0-9_]+]])
+// CHECK: } {triton.debug_line.class = "control"} loc(#[[$CONTROL_IF_LOC:[A-Za-z0-9_]+]])
 // CHECK: scf.for
-// CHECK-SAME: triton.debug_line.class = "control"
-// CHECK-SAME: loc(#[[$CONTROL_FOR_LOC:[A-Za-z0-9_]+]])
+// CHECK: } {triton.debug_line.class = "control"} loc(#[[$CONTROL_FOR_LOC:[A-Za-z0-9_]+]])
 // CHECK: return
 // CHECK-SAME: triton.debug_line.class = "control"
 // CHECK-SAME: loc(#[[$CONTROL_RETURN_LOC:[A-Za-z0-9_]+]])
