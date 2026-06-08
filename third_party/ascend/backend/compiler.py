@@ -142,6 +142,9 @@ def ttir_to_linalg(mod, metadata, opt, *, named_ops=False):
         if metadata["enable_dynamic_cv_pipeline"]:
             ascend.passes.ttir.add_dynamic_cv_pipeline(pm, compile_on_910_95)
 
+        if not _is_debug_line_info_disabled():
+            ascend.passes.ttir.add_normalize_debug_line_locations(pm)
+
         _val = metadata.get("intra_cache_num")
         if _val is not None:
             ascend.passes.ttir.set_buffer_count(0, _val)
