@@ -64,68 +64,100 @@ module {
 // CHECK-LABEL: func.func @control_ops
 // CHECK: cf.br
 // CHECK-SAME: triton.debug_line.class = "control"
-// CHECK-SAME: loc("control.py":2:3)
+// CHECK-SAME: loc(#[[$CONTROL_BR_LOC:[A-Za-z0-9_]+]])
 // CHECK: scf.if
 // CHECK-SAME: triton.debug_line.class = "control"
-// CHECK-SAME: loc("control.py":3:5)
+// CHECK-SAME: loc(#[[$CONTROL_IF_LOC:[A-Za-z0-9_]+]])
 // CHECK: scf.for
 // CHECK-SAME: triton.debug_line.class = "control"
-// CHECK-SAME: loc("control.py":5:5)
-// CHECK: scf.yield
-// CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = loc("control.py":5:9)
-// CHECK-SAME: loc(unknown)
+// CHECK-SAME: loc(#[[$CONTROL_FOR_LOC:[A-Za-z0-9_]+]])
+// CHECK: return
+// CHECK-SAME: triton.debug_line.class = "control"
+// CHECK-SAME: loc(#[[$CONTROL_RETURN_LOC:[A-Za-z0-9_]+]])
 
 // CHECK-LABEL: func.func @synthetic_glue
 // CHECK: builtin.unrealized_conversion_cast
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = loc("glue.py":2:5)
-// CHECK-SAME: loc(unknown)
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: loc(#[[$UNKNOWN_LOC:[A-Za-z0-9_]+]])
 // CHECK: memref.subview
-// CHECK-SAME: memref<8xf32> to memref<4xf32, strided<[1], offset: ?>>
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = loc("glue.py":3:5)
-// CHECK-SAME: loc(unknown)
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>>
+// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
 
 // CHECK-LABEL: func.func @future_line_constant
-// CHECK: arith.constant 1
+// CHECK: arith.constant
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: 0 : index
+// CHECK: arith.constant
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = loc("future.py":24:5)
-// CHECK-SAME: loc(unknown)
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: 1 : index
+// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
 // CHECK: memref.load
 // CHECK-SAME: triton.debug_line.class = "semantic"
-// CHECK-SAME: loc("future.py":24:7)
+// CHECK-SAME: loc(#[[$FUTURE_LOAD_LOC:[A-Za-z0-9_]+]])
 // CHECK: arith.addi
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = loc("future.py":13:5)
-// CHECK-SAME: loc(unknown)
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: : index
+// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
 
 // CHECK-LABEL: llvm.func @llvm_constant
 // CHECK: llvm.mlir.constant
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = loc("llvm.py":20:5)
-// CHECK-SAME: loc(unknown)
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
 
 // CHECK-LABEL: func.func @nameloc_is_source
 // CHECK: memref.load
 // CHECK-SAME: triton.debug_line.class = "semantic"
-// CHECK-SAME: loc("trace_ptr"("name.py":7:9))
+// CHECK-SAME: loc(#[[$TRACE_LOC:[A-Za-z0-9_]+]])
 
 // CHECK-LABEL: func.func @fused_scope_is_preserved
 // CHECK: memref.load
 // CHECK-SAME: triton.debug_line.class = "semantic"
-// CHECK-SAME: loc(fused<#di_sp>["scope.py":7:9])
+// CHECK-SAME: loc(#[[$FUSED_LOC:[A-Za-z0-9_]+]])
 
 // CHECK-LABEL: func.func @shape_is_unchanged(
 // CHECK-SAME: %[[ARG0:[A-Za-z0-9_]+]]: memref<8xf32>
 // CHECK-SAME: %[[ARG1:[A-Za-z0-9_]+]]: memref<8xf32>
 // CHECK-SAME: %[[IDX:[A-Za-z0-9_]+]]: index
-// CHECK: %[[SUB:.*]] = memref.subview %[[ARG0]][%[[IDX]]] [4] [1] : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>>
+// CHECK-SAME: -> i32
+// CHECK: %[[SUB:.*]] = memref.subview %[[ARG0]][%[[IDX]]] [4] [1]
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: loc(unknown)
-// CHECK: %[[V:.*]] = memref.load %[[ARG1]][%[[IDX]]] : memref<8xf32>
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>>
+// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
+// CHECK: %[[V:.*]] = memref.load %[[ARG1]][%[[IDX]]]
 // CHECK-SAME: triton.debug_line.class = "semantic"
-// CHECK: %[[R:.*]] = arith.addi %{{.*}}, %{{.*}} : i32
+// CHECK-SAME: : memref<8xf32>
+// CHECK-SAME: loc(#[[$SHAPE_LOAD_LOC:[A-Za-z0-9_]+]])
+// CHECK: %[[C1:.*]] = arith.constant
 // CHECK-SAME: triton.debug_line.class = "semantic"
-// CHECK: return %[[R]] : i32
+// CHECK-SAME: 1 : i32
+// CHECK-SAME: loc(#[[$SHAPE_CONST_LOC:[A-Za-z0-9_]+]])
+// CHECK: %[[R:.*]] = arith.addi %[[C1]], %[[C1]]
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: : i32
+// CHECK-SAME: loc(#[[$SHAPE_ADDI_LOC:[A-Za-z0-9_]+]])
+// CHECK: return
 // CHECK-SAME: triton.debug_line.class = "control"
+// CHECK-SAME: %[[R]] : i32
+// CHECK-SAME: loc(#[[$SHAPE_RETURN_LOC:[A-Za-z0-9_]+]])
+
+// CHECK-DAG: #[[$UNKNOWN_LOC]] = loc(unknown)
+// CHECK-DAG: #[[$CONTROL_BR_LOC]] = loc("control.py":2:3)
+// CHECK-DAG: #[[$CONTROL_IF_LOC]] = loc("control.py":3:5)
+// CHECK-DAG: #[[$CONTROL_FOR_LOC]] = loc("control.py":5:5)
+// CHECK-DAG: #[[$CONTROL_RETURN_LOC]] = loc("control.py":6:3)
+// CHECK-DAG: #[[$FUTURE_LOAD_LOC]] = loc("future.py":24:7)
+// CHECK: #[[$NAME_FILE_LOC:[A-Za-z0-9_]+]] = loc("name.py":7:9)
+// CHECK: #[[$SCOPE_FILE_LOC:[A-Za-z0-9_]+]] = loc("scope.py":7:9)
+// CHECK: #[[$TRACE_LOC]] = loc("trace_ptr"(#[[$NAME_FILE_LOC]]))
+// CHECK: #[[$FUSED_LOC]] = loc(fused<{{.*}}>[#[[$SCOPE_FILE_LOC]]])
+// CHECK-DAG: #[[$SHAPE_LOAD_LOC]] = loc("shape.py":3:5)
+// CHECK-DAG: #[[$SHAPE_CONST_LOC]] = loc("shape.py":4:5)
+// CHECK-DAG: #[[$SHAPE_ADDI_LOC]] = loc("shape.py":5:5)
+// CHECK-DAG: #[[$SHAPE_RETURN_LOC]] = loc("shape.py":6:3)
