@@ -71,8 +71,8 @@ std::string getSourceLineKey(SourceLine line) {
 bool isInternalName(StringRef name) {
   return name.contains("synthetic") || name.contains("lowering") ||
          name.contains("helper") || name.contains("tmp") ||
-         name.contains("__") || name.startswith("llvm.") ||
-         name.startswith("triton.");
+         name.contains("__") || name.starts_with("llvm.") ||
+         name.starts_with("triton.");
 }
 
 Location canonicalizeSourceLoc(Location loc) {
@@ -162,19 +162,19 @@ bool isExplicitlyMarkedSynthetic(Operation *op) {
 
 bool isRealMemoryOrCallOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
-  return name.endswith(".load") || name.endswith(".store") ||
-         name.contains("atomic") || name.endswith(".call") ||
+  return name.ends_with(".load") || name.ends_with(".store") ||
+         name.contains("atomic") || name.ends_with(".call") ||
          name == "func.call" || name == "llvm.call";
 }
 
 bool isArithmeticOrCastOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
-  return name.startswith("arith.") || name.endswith(".add") ||
-         name.endswith(".sub") || name.endswith(".mul") ||
-         name.endswith(".div") || name.endswith(".rem") ||
-         name.endswith(".and") || name.endswith(".or") ||
-         name.endswith(".xor") || name.endswith(".shl") ||
-         name.endswith(".shr") || name.contains(".cmp") ||
+  return name.starts_with("arith.") || name.ends_with(".add") ||
+         name.ends_with(".sub") || name.ends_with(".mul") ||
+         name.ends_with(".div") || name.ends_with(".rem") ||
+         name.ends_with(".and") || name.ends_with(".or") ||
+         name.ends_with(".xor") || name.ends_with(".shl") ||
+         name.ends_with(".shr") || name.contains(".cmp") ||
          name.contains("cast") || name.contains("ext") || name.contains("trunc");
 }
 

@@ -5,7 +5,7 @@
 #di_sp = #llvm.di_subprogram<compileUnit = #di_cu, scope = #di_file, name = "scoped", file = #di_file, subprogramFlags = "Definition|Optimized">
 
 module {
-  func.func @control_ops(%cond: i1) loc("control.py":1:1) {
+  func.func @control_ops(%cond: i1) {
     cf.br ^bb1 loc("control.py":2:3)
   ^bb1:
     scf.if %cond {
@@ -19,7 +19,7 @@ module {
     func.return loc("control.py":6:3)
   }
 
-  func.func @synthetic_glue(%arg0: memref<8xf32>, %idx: index, %cond: i1) loc("glue.py":1:1) {
+  func.func @synthetic_glue(%arg0: memref<8xf32>, %idx: index, %cond: i1) {
     %cast = builtin.unrealized_conversion_cast %idx : index to i64 loc("glue.py":2:5)
     %sub = memref.subview %arg0[%idx] [4] [1] : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>> loc("glue.py":3:5)
     scf.if %cond {
@@ -27,7 +27,7 @@ module {
     func.return loc("glue.py":5:3)
   }
 
-  func.func @future_line_constant(%arg0: memref<4xf32>) loc("future.py":1:1) {
+  func.func @future_line_constant(%arg0: memref<4xf32>) {
     %c0 = arith.constant 0 : index loc("future.py":8:5)
     %c1 = arith.constant 1 : index loc("future.py":24:5)
     %v = memref.load %arg0[%c0] : memref<4xf32> loc("future.py":24:7)
@@ -38,21 +38,21 @@ module {
   llvm.func @llvm_constant() {
     %0 = llvm.mlir.constant(7 : i32) : i32 loc("llvm.py":20:5)
     llvm.return loc("llvm.py":21:3)
-  } loc("llvm.py":1:1)
+  }
 
-  func.func @nameloc_is_source(%arg0: memref<4xf32>) loc("name.py":1:1) {
+  func.func @nameloc_is_source(%arg0: memref<4xf32>) {
     %c0 = arith.constant 0 : index loc("name.py":2:5)
     %v = memref.load %arg0[%c0] : memref<4xf32> loc("trace_ptr"("name.py":7:9))
     func.return loc("name.py":8:3)
   }
 
-  func.func @fused_scope_is_preserved(%arg0: memref<4xf32>) loc("scope.py":1:1) {
+  func.func @fused_scope_is_preserved(%arg0: memref<4xf32>) {
     %c0 = arith.constant 0 : index loc("scope.py":2:5)
     %v = memref.load %arg0[%c0] : memref<4xf32> loc(fused<#di_sp>["scope.py":7:9])
     func.return loc("scope.py":8:3)
   }
 
-  func.func @shape_is_unchanged(%arg0: memref<8xf32>, %arg1: memref<8xf32>, %idx: index) -> i32 loc("shape.py":1:1) {
+  func.func @shape_is_unchanged(%arg0: memref<8xf32>, %arg1: memref<8xf32>, %idx: index) -> i32 {
     %sub = memref.subview %arg0[%idx] [4] [1] : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>> loc("shape.py":2:5)
     %v = memref.load %arg1[%idx] : memref<8xf32> loc("shape.py":3:5)
     %c1 = arith.constant 1 : i32 loc("shape.py":4:5)
