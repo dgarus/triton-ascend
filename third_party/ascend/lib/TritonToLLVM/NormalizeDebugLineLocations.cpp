@@ -7,12 +7,14 @@
 #include "mlir/IR/Location.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
 
+#include <optional>
 #include <string>
 
 namespace mlir {
@@ -58,12 +60,14 @@ bool hasRealFileLineColLoc(Location loc) {
 SourceLine getSourceLine(Location loc) {
   if (auto fileLoc = loc->findInstanceOf<FileLineColLoc>())
     return {fileLoc.getFilename(), fileLoc.getLine()};
+
   return {};
 }
 
 std::string getSourceLineKey(SourceLine line) {
   if (!line)
     return {};
+
   std::string key = line.file.getValue().str();
   key += ":";
   key += std::to_string(line.line);
@@ -102,6 +106,7 @@ bool hasSourceLikeLocation(Operation *op) {
 
 bool isControlOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
+
   return llvm::StringSwitch<bool>(name)
       .Case("scf.for", true)
       .Case("scf.while", true)
@@ -120,6 +125,7 @@ bool isControlOp(Operation *op) {
 
 bool isAlwaysSyntheticOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
+
   return llvm::StringSwitch<bool>(name)
       .Case("scf.yield", true)
       .Case("builtin.unrealized_conversion_cast", true)
@@ -133,16 +139,19 @@ bool isAlwaysSyntheticOp(Operation *op) {
 }
 
 bool isMaybeHelperConstant(Operation *op) {
-  StringRef name = op->getName().getStringRef();
-  return name == "arith.constant";
+  return op->getName().getStringRef() == "arith.constant";
 }
 
 bool isTensorOnlyLinalgFillOp(Operation *op) {
   if (op->getName().getStringRef() != "linalg.fill")
     return false;
 
-  return llvm::any_of(op->getResultTypes(),
-                      [](Type type) { return isa<TensorType>(type); });
+  if (op->getNumResults() == 0)
+    return false;
+
+  return llvm::all_of(op->getResultTypes(), [](Type type) {
+    return isa<TensorType>(type);
+  });
 }
 
 bool isExplicitlyMarkedSynthetic(Operation *op) {
@@ -163,6 +172,7 @@ bool isExplicitlyMarkedSynthetic(Operation *op) {
 
 bool isRealMemoryOrCallOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
+
   return name.ends_with(".load") || name.ends_with(".store") ||
          name.contains("atomic") || name.ends_with(".call") ||
          name == "func.call" || name == "llvm.call";
@@ -170,13 +180,15 @@ bool isRealMemoryOrCallOp(Operation *op) {
 
 bool isArithmeticOrCastOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
+
   return name.starts_with("arith.") || name.ends_with(".add") ||
          name.ends_with(".sub") || name.ends_with(".mul") ||
          name.ends_with(".div") || name.ends_with(".rem") ||
          name.ends_with(".and") || name.ends_with(".or") ||
          name.ends_with(".xor") || name.ends_with(".shl") ||
          name.ends_with(".shr") || name.contains(".cmp") ||
-         name.contains("cast") || name.contains("ext") || name.contains("trunc");
+         name.contains("cast") || name.contains("ext") ||
+         name.contains("trunc");
 }
 
 bool isUserVisibleStoreAnchorOp(Operation *op) {
@@ -184,8 +196,57 @@ bool isUserVisibleStoreAnchorOp(Operation *op) {
          "bufferization.materialize_in_destination";
 }
 
+bool isDestinationViewOp(Operation *op) {
+  StringRef name = op->getName().getStringRef();
+
+  return name == "memref.reinterpret_cast" || name == "memref.subview";
+}
+
+std::optional<Location> getUserVisibleStoreLocForDestinationView(Operation *op) {
+  if (!isDestinationViewOp(op))
+    return std::nullopt;
+
+  if (op->getNumResults() != 1)
+    return std::nullopt;
+
+  SourceLine opLine = getSourceLine(canonicalizeSourceLoc(op->getLoc()));
+  if (!opLine)
+    return std::nullopt;
+
+  Value result = op->getResult(0);
+
+  for (Operation *user : result.getUsers()) {
+    if (!isUserVisibleStoreAnchorOp(user))
+      continue;
+
+    SourceLine userLine =
+        getSourceLine(canonicalizeSourceLoc(user->getLoc()));
+
+    if (!userLine || !(userLine == opLine))
+      continue;
+
+    for (OpOperand &operand : user->getOpOperands()) {
+      if (operand.get() != result)
+        continue;
+
+      // bufferization.materialize_in_destination:
+      //   operand #0 = source tensor/value
+      //   operand #1 = destination memref/view
+      if (operand.getOperandNumber() == 1)
+        return canonicalizeSourceLoc(user->getLoc());
+    }
+  }
+
+  return std::nullopt;
+}
+
+bool isDestinationViewForUserVisibleStore(Operation *op) {
+  return getUserVisibleStoreLocForDestinationView(op).has_value();
+}
+
 bool isValuePreparationOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
+
   return llvm::StringSwitch<bool>(name)
              .Case("arith.constant", true)
              .Case("tensor.empty", true)
@@ -199,6 +260,7 @@ bool isValuePreparationOp(Operation *op) {
 
 bool isAddressComputationOp(Operation *op) {
   StringRef name = op->getName().getStringRef();
+
   return llvm::StringSwitch<bool>(name)
              .Case("memref.reinterpret_cast", true)
              .Case("memref.subview", true)
@@ -206,6 +268,75 @@ bool isAddressComputationOp(Operation *op) {
              .Default(false) ||
          name.contains("cast") || name.contains("ext") ||
          name.contains("trunc");
+}
+
+std::optional<Location>
+getUserVisibleStoreLocThroughDestinationView(Operation *op) {
+  if (op->getNumResults() != 1)
+    return std::nullopt;
+
+  Value result = op->getResult(0);
+
+  for (Operation *viewUser : result.getUsers()) {
+    if (!isDestinationViewForUserVisibleStore(viewUser))
+      continue;
+
+    return getUserVisibleStoreLocForDestinationView(viewUser);
+  }
+
+  return std::nullopt;
+}
+
+std::optional<Location>
+getUserVisibleStoreLocThroughTensorInsert(Operation *op) {
+  if (op->getNumResults() != 1)
+    return std::nullopt;
+
+  Value result = op->getResult(0);
+
+  for (Operation *insertUser : result.getUsers()) {
+    if (insertUser->getName().getStringRef() != "tensor.insert")
+      continue;
+
+    // tensor.insert:
+    //   operand #0 = scalar/value being inserted
+    if (insertUser->getNumOperands() == 0 || insertUser->getOperand(0) != result)
+      continue;
+
+    if (insertUser->getNumResults() != 1)
+      continue;
+
+    SourceLine insertLine =
+        getSourceLine(canonicalizeSourceLoc(insertUser->getLoc()));
+    if (!insertLine)
+      continue;
+
+    Value insertedTensor = insertUser->getResult(0);
+
+    for (Operation *storeUser : insertedTensor.getUsers()) {
+      if (!isUserVisibleStoreAnchorOp(storeUser))
+        continue;
+
+      SourceLine storeLine =
+          getSourceLine(canonicalizeSourceLoc(storeUser->getLoc()));
+
+      if (!storeLine || !(storeLine == insertLine))
+        continue;
+
+      for (OpOperand &operand : storeUser->getOpOperands()) {
+        if (operand.get() != insertedTensor)
+          continue;
+
+        // bufferization.materialize_in_destination:
+        //   operand #0 = source tensor/value
+        //   operand #1 = destination memref/view
+        if (operand.getOperandNumber() == 0)
+          return canonicalizeSourceLoc(storeUser->getLoc());
+      }
+    }
+  }
+
+  return std::nullopt;
 }
 
 DebugLineLocClass classifyOperation(
@@ -283,19 +414,60 @@ Location makeSyntheticDebugLoc(Operation *op, Location originalLoc) {
 
   if (auto fileLoc = sourceLoc->findInstanceOf<FileLineColLoc>()) {
     // Do not use UnknownLoc here: downstream LLVM/Ascend debug-info lowering
-    // expects a file-like location for some operations and may fail on UnknownLoc.
+    // expects a file-like location for some operations and may fail on
+    // UnknownLoc.
     //
-    // DWARF line 0 is used as a non-user source anchor: it preserves a valid file
-    // identity while preventing synthetic/helper ops from being associated with
-    // real Python source lines.
-    return FileLineColLoc::get(
-        context,
-        fileLoc.getFilename().getValue(),
-        /*line=*/0,
-        /*column=*/0);
+    // DWARF line 0 is used as a non-user source anchor: it preserves a valid
+    // file identity while preventing synthetic/helper ops from being associated
+    // with real Python source lines.
+    return FileLineColLoc::get(context, fileLoc.getFilename().getValue(),
+                               /*line=*/0,
+                               /*column=*/0);
   }
 
   return originalLoc;
+}
+
+void preserveOrigin(Operation *op, Location originalLoc) {
+  if (!isa<UnknownLoc>(originalLoc) && !op->hasAttr(kOriginAttr))
+    op->setAttr(kOriginAttr, originalLoc);
+}
+
+void markRetargetedSyntheticOp(Operation *op, Location originalLoc,
+                               Location storeLoc) {
+  MLIRContext *context = op->getContext();
+
+  op->setAttr(kClassAttr,
+              StringAttr::get(context,
+                              stringifyClass(DebugLineLocClass::Semantic)));
+  preserveOrigin(op, originalLoc);
+  op->setLoc(storeLoc);
+}
+
+bool retargetSyntheticOpToStoreLoc(Operation *op, Location originalLoc) {
+  if (isAddressComputationOp(op) || isArithmeticOrCastOp(op)) {
+    if (std::optional<Location> storeLoc =
+            getUserVisibleStoreLocForDestinationView(op)) {
+      markRetargetedSyntheticOp(op, originalLoc, *storeLoc);
+      return true;
+    }
+
+    if (std::optional<Location> storeLoc =
+            getUserVisibleStoreLocThroughDestinationView(op)) {
+      markRetargetedSyntheticOp(op, originalLoc, *storeLoc);
+      return true;
+    }
+  }
+
+  if (isArithmeticOrCastOp(op)) {
+    if (std::optional<Location> storeLoc =
+            getUserVisibleStoreLocThroughTensorInsert(op)) {
+      markRetargetedSyntheticOp(op, originalLoc, *storeLoc);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void markOperation(Operation *op, DebugLineLocClass locClass) {
@@ -307,8 +479,10 @@ void markOperation(Operation *op, DebugLineLocClass locClass) {
   op->setAttr(kClassAttr, StringAttr::get(context, stringifyClass(locClass)));
 
   if (locClass == DebugLineLocClass::Synthetic) {
-    if (!isa<UnknownLoc>(originalLoc) && !op->hasAttr(kOriginAttr))
-      op->setAttr(kOriginAttr, originalLoc);
+    if (retargetSyntheticOpToStoreLoc(op, originalLoc))
+      return;
+
+    preserveOrigin(op, originalLoc);
 
     op->setLoc(makeSyntheticDebugLoc(op, originalLoc));
     return;
@@ -325,9 +499,11 @@ void collectSemanticAnchors(Block &block,
         isExplicitlyMarkedSynthetic(&op) || !hasSourceLikeLocation(&op))
       continue;
 
-    if (isUserVisibleStoreAnchorOp(&op) || isRealMemoryOrCallOp(&op))
-      if (SourceLine line = getSourceLine(canonicalizeSourceLoc(op.getLoc())))
-        ++semanticAnchors[getSourceLineKey(line)];
+    if (!isUserVisibleStoreAnchorOp(&op) && !isRealMemoryOrCallOp(&op))
+      continue;
+
+    if (SourceLine line = getSourceLine(canonicalizeSourceLoc(op.getLoc())))
+      ++semanticAnchors[getSourceLineKey(line)];
   }
 }
 
@@ -350,9 +526,10 @@ struct NormalizeDebugLineLocationsPass
       markOperation(&op, locClass);
 
       if (locClass == DebugLineLocClass::Semantic ||
-          locClass == DebugLineLocClass::Control)
+          locClass == DebugLineLocClass::Control) {
         if (SourceLine line = getSourceLine(op.getLoc()))
           previousLine = line;
+      }
     }
   }
 

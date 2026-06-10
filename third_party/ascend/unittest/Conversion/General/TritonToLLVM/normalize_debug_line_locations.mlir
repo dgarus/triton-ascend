@@ -27,13 +27,20 @@ module {
     func.return loc("glue.py":5:3)
   }
 
-  func.func @source_line_write_anchor(%dst: memref<8xi32>, %idx: index) {
+  func.func @source_line_write_anchor(%trace: memref<8xi32>, %counter: memref<1xi32>) {
+    %c0 = arith.constant 0 : index loc("loop_reordering.py":23:21)
+    %ticket = memref.load %counter[%c0] : memref<1xi32> loc("ticket"("loop_reordering.py":23:21))
+    %ticket_idx = arith.index_cast %ticket : i32 to index loc("ticket"("loop_reordering.py":23:21))
     %c200_i32 = arith.constant 200 : i32 loc("loop_reordering.py":24:33)
     %empty = tensor.empty() : tensor<1xi32> loc("loop_reordering.py":24:33)
     %filled = linalg.fill ins(%c200_i32 : i32) outs(%empty : tensor<1xi32>) -> tensor<1xi32> loc("loop_reordering.py":24:33)
-    %view = memref.reinterpret_cast %dst to offset: [%idx], sizes: [1], strides: [1] : memref<8xi32> to memref<1xi32, strided<[1], offset: ?>> loc("loop_reordering.py":24:33)
+    %view = memref.reinterpret_cast %trace to offset: [%ticket_idx], sizes: [1], strides: [1] : memref<8xi32> to memref<1xi32, strided<[1], offset: ?>> loc("loop_reordering.py":24:33)
     bufferization.materialize_in_destination %filled in writable %view : (tensor<1xi32>, memref<1xi32, strided<[1], offset: ?>>) -> () loc("loop_reordering.py":24:33)
-    func.return loc("loop_reordering.py":25:3)
+    %c1_i32 = arith.constant 1 : i32 loc("loop_reordering.py":25:35)
+    %next_ticket = arith.addi %ticket, %c1_i32 : i32 loc("loop_reordering.py":25:35)
+    %inserted = tensor.insert %next_ticket into %empty[%c0] : tensor<1xi32> loc("loop_reordering.py":25:26)
+    bufferization.materialize_in_destination %inserted in writable %counter : (tensor<1xi32>, memref<1xi32>) -> () loc("loop_reordering.py":25:26)
+    func.return loc("loop_reordering.py":26:3)
   }
 
   func.func @memref_fill_anchor(%dst: memref<4xf32>) {
@@ -100,33 +107,65 @@ module {
 // CHECK-SAME: loc(#[[GLUE_SYNTH_LOC]])
 
 // CHECK-LABEL: func.func @source_line_write_anchor
-// CHECK: %[[C200:.*]] = arith.constant
+// CHECK: %[[TICKET:[A-Za-z0-9_]+]] = memref.load
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: : memref<1xi32>
+// CHECK-SAME: loc(#[[LOOP_TICKET_LOC:[A-Za-z0-9_]+]])
+
+// CHECK: %[[TICKET_IDX:[A-Za-z0-9_]+]] = arith.index_cast %[[TICKET]]
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: triton.debug_line.origin = #[[LOOP_TICKET_LOC]]
+// CHECK-SAME: : i32 to index
+// CHECK-SAME: loc(#[[LOOP_WRITE_LOC:[A-Za-z0-9_]+]])
+
+// CHECK: %[[C200:[A-Za-z0-9_]+]] = arith.constant
 // CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = #[[LOOP_WRITE_LOC:[A-Za-z0-9_]+]]
+// CHECK-SAME: triton.debug_line.origin = #[[LOOP_WRITE_LOC]]
 // CHECK-SAME: 200 : i32
 // CHECK-SAME: loc(#[[LOOP_SYNTH_LOC:[A-Za-z0-9_]+]])
 
-// CHECK: %[[EMPTY:.*]] = tensor.empty
+// CHECK: %[[EMPTY:[A-Za-z0-9_]+]] = tensor.empty
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin = #[[LOOP_WRITE_LOC]]
 // CHECK-SAME: tensor<1xi32>
 // CHECK-SAME: loc(#[[LOOP_SYNTH_LOC]])
 
-// CHECK: %[[FILLED:.*]] = linalg.fill
+// CHECK: %[[FILLED:[A-Za-z0-9_]+]] = linalg.fill
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin = #[[LOOP_WRITE_LOC]]
 // CHECK-SAME: ins(%[[C200]] : i32) outs(%[[EMPTY]] : tensor<1xi32>) -> tensor<1xi32>
 // CHECK-SAME: loc(#[[LOOP_SYNTH_LOC]])
 
-// CHECK: %[[VIEW:.*]] = memref.reinterpret_cast
-// CHECK-SAME: triton.debug_line.class = "synthetic"
-// CHECK-SAME: triton.debug_line.origin = #[[LOOP_WRITE_LOC]]
+// CHECK: %[[VIEW:[A-Za-z0-9_]+]] = memref.reinterpret_cast
+// CHECK-SAME: %[[TICKET_IDX]]
+// CHECK-SAME: triton.debug_line.class = "semantic"
 // CHECK-SAME: memref<8xi32> to memref<1xi32, strided<[1], offset: ?>>
-// CHECK-SAME: loc(#[[LOOP_SYNTH_LOC]])
+// CHECK-SAME: loc(#[[LOOP_WRITE_LOC]])
 
 // CHECK: bufferization.materialize_in_destination %[[FILLED]] in writable %[[VIEW]]
 // CHECK-SAME: triton.debug_line.class = "semantic"
 // CHECK-SAME: loc(#[[LOOP_WRITE_LOC]])
+
+// CHECK: %[[C1:[A-Za-z0-9_]+]] = arith.constant
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin = #[[LOOP_NEXT_VALUE_LOC:[A-Za-z0-9_]+]]
+// CHECK-SAME: 1 : i32
+// CHECK-SAME: loc(#[[LOOP_SYNTH_LOC]])
+
+// CHECK: %[[NEXT:[A-Za-z0-9_]+]] = arith.addi %[[TICKET]], %[[C1]]
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: triton.debug_line.origin = #[[LOOP_NEXT_VALUE_LOC]]
+// CHECK-SAME: : i32
+// CHECK-SAME: loc(#[[LOOP_NEXT_STORE_LOC:[A-Za-z0-9_]+]])
+
+// CHECK: %[[INSERTED:[A-Za-z0-9_]+]] = tensor.insert %[[NEXT]] into %[[EMPTY]]
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: tensor<1xi32>
+// CHECK-SAME: loc(#[[LOOP_NEXT_STORE_LOC]])
+
+// CHECK: bufferization.materialize_in_destination %[[INSERTED]] in writable
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: loc(#[[LOOP_NEXT_STORE_LOC]])
 
 // CHECK-LABEL: func.func @memref_fill_anchor
 // CHECK: arith.constant
