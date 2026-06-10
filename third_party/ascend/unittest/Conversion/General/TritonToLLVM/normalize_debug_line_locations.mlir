@@ -1,4 +1,4 @@
-// RUN: triton-opt %s --normalize-debug-line-locations --mlir-print-debuginfo | FileCheck %s
+// RUN: triton-opt %s -split-input-file --normalize-debug-line-locations --allow-unregistered-dialect --mlir-print-debuginfo | FileCheck %s
 
 #di_file = #llvm.di_file<"scope.py" in "/tmp">
 #di_cu = #llvm.di_compile_unit<id = distinct[0]<>, sourceLanguage = DW_LANG_C, file = #di_file, producer = "triton", isOptimized = true, emissionKind = LineTablesOnly>
@@ -25,6 +25,21 @@ module {
     scf.if %cond {
     } loc("glue.py":4:5)
     func.return loc("glue.py":5:3)
+  }
+
+  func.func @source_line_write_anchor(%dst: memref<8xi32>, %idx: index) {
+    %c200_i32 = arith.constant 200 : i32 loc("loop_reordering.py":24:33)
+    %empty = tensor.empty() : tensor<1xi32> loc("loop_reordering.py":24:33)
+    %filled = linalg.fill ins(%c200_i32 : i32) outs(%empty : tensor<1xi32>) -> tensor<1xi32> loc("loop_reordering.py":24:33)
+    %view = memref.reinterpret_cast %dst to offset: [%idx], sizes: [1], strides: [1] : memref<8xi32> to memref<1xi32, strided<[1], offset: ?>> loc("loop_reordering.py":24:33)
+    bufferization.materialize_in_destination %filled in writable %view : (tensor<1xi32>, memref<1xi32, strided<[1], offset: ?>>) -> () loc("loop_reordering.py":24:33)
+    func.return loc("loop_reordering.py":25:3)
+  }
+
+  func.func @memref_fill_anchor(%dst: memref<4xf32>) {
+    %cst = arith.constant 0.000000e+00 : f32 loc("memfill.py":3:5)
+    linalg.fill ins(%cst : f32) outs(%dst : memref<4xf32>) loc("memfill.py":3:7)
+    func.return loc("memfill.py":4:3)
   }
 
   func.func @future_line_constant(%arg0: memref<4xf32>) {
@@ -77,22 +92,57 @@ module {
 // CHECK: builtin.unrealized_conversion_cast
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin =
-// CHECK-SAME: loc(#[[$UNKNOWN_LOC:[A-Za-z0-9_]+]])
+// CHECK-SAME: loc(#[[$GLUE_SYNTH_LOC:[A-Za-z0-9_]+]])
 // CHECK: memref.subview
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin =
 // CHECK-SAME: : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>>
-// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
+// CHECK-SAME: loc(#[[$GLUE_SYNTH_LOC]])
+
+// CHECK-LABEL: func.func @source_line_write_anchor
+// CHECK: %[[C200:.*]] = arith.constant
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: 200 : i32
+// CHECK-SAME: loc(#[[$LOOP_SYNTH_LOC:[A-Za-z0-9_]+]])
+// CHECK: %[[EMPTY:.*]] = tensor.empty
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: tensor<1xi32>
+// CHECK-SAME: loc(#[[$LOOP_SYNTH_LOC]])
+// CHECK: %[[FILLED:.*]] = linalg.fill ins(%[[C200]] : i32) outs(%[[EMPTY]] : tensor<1xi32>) -> tensor<1xi32>
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: loc(#[[$LOOP_SYNTH_LOC]])
+// CHECK: %[[VIEW:.*]] = memref.reinterpret_cast
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin =
+// CHECK-SAME: memref<8xi32> to memref<1xi32, strided<[1], offset: ?>>
+// CHECK-SAME: loc(#[[$LOOP_SYNTH_LOC]])
+// CHECK: bufferization.materialize_in_destination %[[FILLED]] in writable %[[VIEW]]
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: loc(#[[$LOOP_WRITE_LOC:[A-Za-z0-9_]+]])
+
+// CHECK-LABEL: func.func @memref_fill_anchor
+// CHECK: arith.constant
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: loc(#[[$MEMFILL_SYNTH_LOC:[A-Za-z0-9_]+]])
+// CHECK: linalg.fill
+// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: outs
+// CHECK-SAME: loc(#[[$MEMFILL_LOC:[A-Za-z0-9_]+]])
 
 // CHECK-LABEL: func.func @future_line_constant
 // CHECK: arith.constant
-// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin =
 // CHECK-SAME: 0 : index
+// CHECK-SAME: loc(#[[$FUTURE_SYNTH_LOC:[A-Za-z0-9_]+]])
 // CHECK: arith.constant
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin =
 // CHECK-SAME: 1 : index
-// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
+// CHECK-SAME: loc(#[[$FUTURE_SYNTH_LOC]])
 // CHECK: memref.load
 // CHECK-SAME: triton.debug_line.class = "semantic"
 // CHECK-SAME: loc(#[[$FUTURE_LOAD_LOC:[A-Za-z0-9_]+]])
@@ -100,13 +150,13 @@ module {
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin =
 // CHECK-SAME: : index
-// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
+// CHECK-SAME: loc(#[[$FUTURE_SYNTH_LOC]])
 
 // CHECK-LABEL: llvm.func @llvm_constant
 // CHECK: llvm.mlir.constant
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin =
-// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
+// CHECK-SAME: loc(#[[$LLVM_SYNTH_LOC:[A-Za-z0-9_]+]])
 
 // CHECK-LABEL: func.func @nameloc_is_source
 // CHECK: memref.load
@@ -127,15 +177,16 @@ module {
 // CHECK-SAME: triton.debug_line.class = "synthetic"
 // CHECK-SAME: triton.debug_line.origin =
 // CHECK-SAME: : memref<8xf32> to memref<4xf32, strided<[1], offset: ?>>
-// CHECK-SAME: loc(#[[$UNKNOWN_LOC]])
+// CHECK-SAME: loc(#[[$SHAPE_SYNTH_LOC:[A-Za-z0-9_]+]])
 // CHECK: %[[V:.*]] = memref.load %[[ARG1]][%[[IDX]]]
 // CHECK-SAME: triton.debug_line.class = "semantic"
 // CHECK-SAME: : memref<8xf32>
 // CHECK-SAME: loc(#[[$SHAPE_LOAD_LOC:[A-Za-z0-9_]+]])
 // CHECK: %[[C1:.*]] = arith.constant
-// CHECK-SAME: triton.debug_line.class = "semantic"
+// CHECK-SAME: triton.debug_line.class = "synthetic"
+// CHECK-SAME: triton.debug_line.origin =
 // CHECK-SAME: 1 : i32
-// CHECK-SAME: loc(#[[$SHAPE_CONST_LOC:[A-Za-z0-9_]+]])
+// CHECK-SAME: loc(#[[$SHAPE_SYNTH_LOC]])
 // CHECK: %[[R:.*]] = arith.addi %[[C1]], %[[C1]]
 // CHECK-SAME: triton.debug_line.class = "semantic"
 // CHECK-SAME: : i32
@@ -145,16 +196,22 @@ module {
 // CHECK-SAME: %[[R]] : i32
 // CHECK-SAME: loc(#[[$SHAPE_RETURN_LOC:[A-Za-z0-9_]+]])
 
-// CHECK-DAG: #[[$UNKNOWN_LOC]] = loc(unknown)
 // CHECK-DAG: #[[$CONTROL_BR_LOC]] = loc("control.py":2:3)
 // CHECK-DAG: #[[$CONTROL_IF_LOC]] = loc("control.py":3:5)
 // CHECK-DAG: #[[$CONTROL_FOR_LOC]] = loc("control.py":5:5)
 // CHECK-DAG: #[[$CONTROL_RETURN_LOC]] = loc("control.py":6:3)
+// CHECK-DAG: #[[$GLUE_SYNTH_LOC]] = loc("glue.py":0:0)
+// CHECK-DAG: #[[$LOOP_SYNTH_LOC]] = loc("loop_reordering.py":0:0)
+// CHECK-DAG: #[[$LOOP_WRITE_LOC]] = loc("loop_reordering.py":24:33)
+// CHECK-DAG: #[[$MEMFILL_SYNTH_LOC]] = loc("memfill.py":0:0)
+// CHECK-DAG: #[[$MEMFILL_LOC]] = loc("memfill.py":3:7)
+// CHECK-DAG: #[[$FUTURE_SYNTH_LOC]] = loc("future.py":0:0)
 // CHECK-DAG: #[[$FUTURE_LOAD_LOC]] = loc("future.py":24:7)
+// CHECK-DAG: #[[$LLVM_SYNTH_LOC]] = loc("llvm.py":0:0)
 // CHECK-DAG: #[[$NAME_FILE_LOC:[A-Za-z0-9_]+]] = loc("name.py":7:9)
 // CHECK-DAG: #[[$SCOPE_FILE_LOC:[A-Za-z0-9_]+]] = loc("scope.py":7:9)
+// CHECK-DAG: #[[$SHAPE_SYNTH_LOC]] = loc("shape.py":0:0)
 // CHECK-DAG: #[[$SHAPE_LOAD_LOC]] = loc("shape.py":3:5)
-// CHECK-DAG: #[[$SHAPE_CONST_LOC]] = loc("shape.py":4:5)
 // CHECK-DAG: #[[$SHAPE_ADDI_LOC]] = loc("shape.py":5:5)
 // CHECK-DAG: #[[$SHAPE_RETURN_LOC]] = loc("shape.py":6:3)
 // CHECK: #[[$TRACE_LOC]] = loc("trace_ptr"(#[[$NAME_FILE_LOC]]))

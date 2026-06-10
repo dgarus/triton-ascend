@@ -3,10 +3,12 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -121,27 +123,26 @@ bool isAlwaysSyntheticOp(Operation *op) {
   return llvm::StringSwitch<bool>(name)
       .Case("scf.yield", true)
       .Case("builtin.unrealized_conversion_cast", true)
-      .Case("bufferization.alloc_tensor", true)
-      .Case("bufferization.to_tensor", true)
-      .Case("bufferization.to_buffer", true)
-      .Case("memref.subview", true)
-      .Case("memref.reinterpret_cast", true)
-      .Case("memref.memory_space_cast", true)
       .Case("memref.copy", true)
       .Case("llvm.mlir.undef", true)
       .Case("llvm.mlir.zero", true)
       .Case("llvm.mlir.constant", true)
       .Case("llvm.mlir.poison", true)
       .Case("llvm.mlir.none", true)
-      .Case("tensor.empty", true)
-      .Case("tensor.from_elements", true)
-      .Case("linalg.fill", true)
       .Default(false);
 }
 
 bool isMaybeHelperConstant(Operation *op) {
   StringRef name = op->getName().getStringRef();
   return name == "arith.constant";
+}
+
+bool isTensorOnlyLinalgFillOp(Operation *op) {
+  if (op->getName().getStringRef() != "linalg.fill")
+    return false;
+
+  return llvm::any_of(op->getResultTypes(),
+                      [](Type type) { return isa<TensorType>(type); });
 }
 
 bool isExplicitlyMarkedSynthetic(Operation *op) {
@@ -183,6 +184,30 @@ bool isUserVisibleStoreAnchorOp(Operation *op) {
          "bufferization.materialize_in_destination";
 }
 
+bool isValuePreparationOp(Operation *op) {
+  StringRef name = op->getName().getStringRef();
+  return llvm::StringSwitch<bool>(name)
+             .Case("arith.constant", true)
+             .Case("tensor.empty", true)
+             .Case("tensor.from_elements", true)
+             .Case("bufferization.alloc_tensor", true)
+             .Case("bufferization.to_tensor", true)
+             .Case("bufferization.to_buffer", true)
+             .Default(false) ||
+         isTensorOnlyLinalgFillOp(op);
+}
+
+bool isAddressComputationOp(Operation *op) {
+  StringRef name = op->getName().getStringRef();
+  return llvm::StringSwitch<bool>(name)
+             .Case("memref.reinterpret_cast", true)
+             .Case("memref.subview", true)
+             .Case("memref.memory_space_cast", true)
+             .Default(false) ||
+         name.contains("cast") || name.contains("ext") ||
+         name.contains("trunc");
+}
+
 DebugLineLocClass classifyOperation(
     Operation *op, const llvm::StringMap<unsigned> &semanticAnchors) {
   if (isContainerOp(op))
@@ -200,17 +225,27 @@ DebugLineLocClass classifyOperation(
   if (isUserVisibleStoreAnchorOp(op))
     return DebugLineLocClass::Semantic;
 
-  if (isAlwaysSyntheticOp(op))
+  if (isRealMemoryOrCallOp(op))
+    return DebugLineLocClass::Semantic;
+
+  SourceLine line = getSourceLine(canonicalizeSourceLoc(op->getLoc()));
+  bool hasSemanticAnchorOnSameLine =
+      line && semanticAnchors.lookup(getSourceLineKey(line)) > 0;
+
+  if (isValuePreparationOp(op))
     return DebugLineLocClass::Synthetic;
 
-  if (isMaybeHelperConstant(op)) {
-    SourceLine line = getSourceLine(canonicalizeSourceLoc(op->getLoc()));
-    if (!line || semanticAnchors.lookup(getSourceLineKey(line)) > 0)
+  if (isAddressComputationOp(op))
+    return DebugLineLocClass::Synthetic;
+
+  if (isArithmeticOrCastOp(op)) {
+    if (hasSemanticAnchorOnSameLine)
       return DebugLineLocClass::Synthetic;
+    return DebugLineLocClass::Semantic;
   }
 
-  if (isRealMemoryOrCallOp(op) || isArithmeticOrCastOp(op))
-    return DebugLineLocClass::Semantic;
+  if (isAlwaysSyntheticOp(op))
+    return DebugLineLocClass::Synthetic;
 
   return DebugLineLocClass::Semantic;
 }
@@ -237,6 +272,7 @@ bool isReorderedBackwardStep(Operation *op, DebugLineLocClass locClass,
     return false;
 
   return isMaybeHelperConstant(op) || isArithmeticOrCastOp(op) ||
+         isValuePreparationOp(op) || isAddressComputationOp(op) ||
          isAlwaysSyntheticOp(op);
 }
 
@@ -285,12 +321,11 @@ void markOperation(Operation *op, DebugLineLocClass locClass) {
 void collectSemanticAnchors(Block &block,
                             llvm::StringMap<unsigned> &semanticAnchors) {
   for (Operation &op : block) {
-    if (isContainerOp(&op) || isControlOp(&op) || isAlwaysSyntheticOp(&op) ||
-        isMaybeHelperConstant(&op))
+    if (isContainerOp(&op) || isControlOp(&op) ||
+        isExplicitlyMarkedSynthetic(&op) || !hasSourceLikeLocation(&op))
       continue;
 
-    if (isUserVisibleStoreAnchorOp(&op) || isRealMemoryOrCallOp(&op) ||
-        isArithmeticOrCastOp(&op))
+    if (isUserVisibleStoreAnchorOp(&op) || isRealMemoryOrCallOp(&op))
       if (SourceLine line = getSourceLine(canonicalizeSourceLoc(op.getLoc())))
         ++semanticAnchors[getSourceLineKey(line)];
   }
