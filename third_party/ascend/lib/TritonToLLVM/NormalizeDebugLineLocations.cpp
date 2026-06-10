@@ -124,7 +124,6 @@ bool isAlwaysSyntheticOp(Operation *op) {
       .Case("bufferization.alloc_tensor", true)
       .Case("bufferization.to_tensor", true)
       .Case("bufferization.to_buffer", true)
-      .Case("bufferization.materialize_in_destination", true)
       .Case("memref.subview", true)
       .Case("memref.reinterpret_cast", true)
       .Case("memref.memory_space_cast", true)
@@ -136,6 +135,7 @@ bool isAlwaysSyntheticOp(Operation *op) {
       .Case("llvm.mlir.none", true)
       .Case("tensor.empty", true)
       .Case("tensor.from_elements", true)
+      .Case("linalg.fill", true)
       .Default(false);
 }
 
@@ -178,17 +178,29 @@ bool isArithmeticOrCastOp(Operation *op) {
          name.contains("cast") || name.contains("ext") || name.contains("trunc");
 }
 
-DebugLineLocClass classifyOperation(Operation *op,
-                                    const llvm::StringMap<unsigned>
-                                        &semanticAnchors) {
+bool isUserVisibleStoreAnchorOp(Operation *op) {
+  return op->getName().getStringRef() ==
+         "bufferization.materialize_in_destination";
+}
+
+DebugLineLocClass classifyOperation(
+    Operation *op, const llvm::StringMap<unsigned> &semanticAnchors) {
   if (isContainerOp(op))
     return DebugLineLocClass::Semantic;
+
   if (isControlOp(op))
     return DebugLineLocClass::Control;
-  if (isExplicitlyMarkedSynthetic(op) || isAlwaysSyntheticOp(op))
+
+  if (isExplicitlyMarkedSynthetic(op))
     return DebugLineLocClass::Synthetic;
 
   if (!hasSourceLikeLocation(op))
+    return DebugLineLocClass::Synthetic;
+
+  if (isUserVisibleStoreAnchorOp(op))
+    return DebugLineLocClass::Semantic;
+
+  if (isAlwaysSyntheticOp(op))
     return DebugLineLocClass::Synthetic;
 
   if (isMaybeHelperConstant(op)) {
@@ -228,19 +240,45 @@ bool isReorderedBackwardStep(Operation *op, DebugLineLocClass locClass,
          isAlwaysSyntheticOp(op);
 }
 
+Location makeSyntheticDebugLoc(Operation *op, Location originalLoc) {
+  MLIRContext *context = op->getContext();
+
+  Location sourceLoc = canonicalizeSourceLoc(originalLoc);
+
+  if (auto fileLoc = sourceLoc->findInstanceOf<FileLineColLoc>()) {
+    // Do not use UnknownLoc here: downstream LLVM/Ascend debug-info lowering
+    // expects a file-like location for some operations and may fail on UnknownLoc.
+    //
+    // DWARF line 0 is used as a non-user source anchor: it preserves a valid file
+    // identity while preventing synthetic/helper ops from being associated with
+    // real Python source lines.
+    return FileLineColLoc::get(
+        context,
+        fileLoc.getFilename().getValue(),
+        /*line=*/0,
+        /*column=*/0);
+  }
+
+  return originalLoc;
+}
+
 void markOperation(Operation *op, DebugLineLocClass locClass) {
   MLIRContext *context = op->getContext();
+
+  Location originalLoc = op->getLoc();
+  Location loc = canonicalizeSourceLoc(originalLoc);
+
   op->setAttr(kClassAttr, StringAttr::get(context, stringifyClass(locClass)));
 
-  Location loc = canonicalizeSourceLoc(op->getLoc());
   if (locClass == DebugLineLocClass::Synthetic) {
-    if (!isa<UnknownLoc>(op->getLoc()) && !op->hasAttr(kOriginAttr))
-      op->setAttr(kOriginAttr, op->getLoc());
-    op->setLoc(UnknownLoc::get(context));
+    if (!isa<UnknownLoc>(originalLoc) && !op->hasAttr(kOriginAttr))
+      op->setAttr(kOriginAttr, originalLoc);
+
+    op->setLoc(makeSyntheticDebugLoc(op, originalLoc));
     return;
   }
 
-  if (loc != op->getLoc())
+  if (loc != originalLoc)
     op->setLoc(loc);
 }
 
@@ -250,7 +288,9 @@ void collectSemanticAnchors(Block &block,
     if (isContainerOp(&op) || isControlOp(&op) || isAlwaysSyntheticOp(&op) ||
         isMaybeHelperConstant(&op))
       continue;
-    if (isRealMemoryOrCallOp(&op) || isArithmeticOrCastOp(&op))
+
+    if (isUserVisibleStoreAnchorOp(&op) || isRealMemoryOrCallOp(&op) ||
+        isArithmeticOrCastOp(&op))
       if (SourceLine line = getSourceLine(canonicalizeSourceLoc(op.getLoc())))
         ++semanticAnchors[getSourceLineKey(line)];
   }
