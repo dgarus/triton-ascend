@@ -18,10 +18,13 @@ def NormalizeDebugLineLocations : Pass<"normalize-debug-line-locations", "mlir::
   let summary = "Normalize locations for source-level debug line tables.";
   let description = [{
     This pass classifies operations as semantic, control, or synthetic from the
-    perspective of source-level debug line table generation. It preserves source
-    locations for semantic/control operations and replaces locations of synthetic
-    lowering-only operations with UnknownLoc while preserving original
-    provenance in attributes. The pass must not change IR semantics or codegen.
+    perspective of source-level debug line table generation. It preserves or
+    canonicalizes source locations for semantic/control operations, records the
+    selected class in attributes, and moves synthetic lowering-only operations to
+    non-user line anchors while preserving original provenance in attributes.
+    Some synthetic address/value preparation operations may be retargeted to the
+    associated user-visible store location when that better reflects the source
+    line. The pass must not change IR semantics or codegen.
   }];
   let constructor = "triton::createNormalizeDebugLineLocationsPass()";
 }

@@ -42,6 +42,16 @@ struct SourceLine {
   bool operator==(const SourceLine &rhs) const {
     return file == rhs.file && line == rhs.line;
   }
+
+  std::string getKey() const {
+    if (!*this)
+      return {};
+
+    std::string key = file.getValue().str();
+    key += ":";
+    key += std::to_string(line);
+    return key;
+  }
 };
 
 bool isContainerOp(Operation *op) {
@@ -62,16 +72,6 @@ SourceLine getSourceLine(Location loc) {
     return {fileLoc.getFilename(), fileLoc.getLine()};
 
   return {};
-}
-
-std::string getSourceLineKey(SourceLine line) {
-  if (!line)
-    return {};
-
-  std::string key = line.file.getValue().str();
-  key += ":";
-  key += std::to_string(line.line);
-  return key;
 }
 
 bool isInternalName(StringRef name) {
@@ -149,9 +149,8 @@ bool isTensorOnlyLinalgFillOp(Operation *op) {
   if (op->getNumResults() == 0)
     return false;
 
-  return llvm::all_of(op->getResultTypes(), [](Type type) {
-    return isa<TensorType>(type);
-  });
+  return llvm::all_of(op->getResultTypes(),
+                      [](Type type) { return isa<TensorType>(type); });
 }
 
 bool isExplicitlyMarkedSynthetic(Operation *op) {
@@ -202,7 +201,8 @@ bool isDestinationViewOp(Operation *op) {
   return name == "memref.reinterpret_cast" || name == "memref.subview";
 }
 
-std::optional<Location> getUserVisibleStoreLocForDestinationView(Operation *op) {
+std::optional<Location>
+getUserVisibleStoreLocForDestinationView(Operation *op) {
   if (!isDestinationViewOp(op))
     return std::nullopt;
 
@@ -219,8 +219,7 @@ std::optional<Location> getUserVisibleStoreLocForDestinationView(Operation *op) 
     if (!isUserVisibleStoreAnchorOp(user))
       continue;
 
-    SourceLine userLine =
-        getSourceLine(canonicalizeSourceLoc(user->getLoc()));
+    SourceLine userLine = getSourceLine(canonicalizeSourceLoc(user->getLoc()));
 
     if (!userLine || !(userLine == opLine))
       continue;
@@ -300,7 +299,8 @@ getUserVisibleStoreLocThroughTensorInsert(Operation *op) {
 
     // tensor.insert:
     //   operand #0 = scalar/value being inserted
-    if (insertUser->getNumOperands() == 0 || insertUser->getOperand(0) != result)
+    if (insertUser->getNumOperands() == 0 ||
+        insertUser->getOperand(0) != result)
       continue;
 
     if (insertUser->getNumResults() != 1)
@@ -339,8 +339,9 @@ getUserVisibleStoreLocThroughTensorInsert(Operation *op) {
   return std::nullopt;
 }
 
-DebugLineLocClass classifyOperation(
-    Operation *op, const llvm::StringMap<unsigned> &semanticAnchors) {
+DebugLineLocClass
+classifyOperation(Operation *op,
+                  const llvm::StringMap<unsigned> &semanticAnchors) {
   if (isContainerOp(op))
     return DebugLineLocClass::Semantic;
 
@@ -361,7 +362,7 @@ DebugLineLocClass classifyOperation(
 
   SourceLine line = getSourceLine(canonicalizeSourceLoc(op->getLoc()));
   bool hasSemanticAnchorOnSameLine =
-      line && semanticAnchors.lookup(getSourceLineKey(line)) > 0;
+      line && semanticAnchors.lookup(line.getKey()) > 0;
 
   if (isValuePreparationOp(op))
     return DebugLineLocClass::Synthetic;
@@ -437,9 +438,9 @@ void markRetargetedSyntheticOp(Operation *op, Location originalLoc,
                                Location storeLoc) {
   MLIRContext *context = op->getContext();
 
-  op->setAttr(kClassAttr,
-              StringAttr::get(context,
-                              stringifyClass(DebugLineLocClass::Semantic)));
+  op->setAttr(
+      kClassAttr,
+      StringAttr::get(context, stringifyClass(DebugLineLocClass::Semantic)));
   preserveOrigin(op, originalLoc);
   op->setLoc(storeLoc);
 }
@@ -503,7 +504,7 @@ void collectSemanticAnchors(Block &block,
       continue;
 
     if (SourceLine line = getSourceLine(canonicalizeSourceLoc(op.getLoc())))
-      ++semanticAnchors[getSourceLineKey(line)];
+      ++semanticAnchors[line.getKey()];
   }
 }
 
