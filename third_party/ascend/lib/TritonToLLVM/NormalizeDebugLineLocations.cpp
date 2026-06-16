@@ -421,9 +421,7 @@ Location makeSyntheticDebugLoc(Operation *op, Location originalLoc) {
     // DWARF line 0 is used as a non-user source anchor: it preserves a valid
     // file identity while preventing synthetic/helper ops from being associated
     // with real Python source lines.
-    return FileLineColLoc::get(context, fileLoc.getFilename().getValue(),
-                               /*line=*/0,
-                               /*column=*/0);
+    return FileLineColLoc::get(context, fileLoc.getFilename().getValue(), 0, 0);
   }
 
   return originalLoc;
