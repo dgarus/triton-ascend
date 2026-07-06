@@ -69,11 +69,11 @@ Memory/Pointer Ops
 
     load
     store
-    make_block_ptr
-    advance
     make_tensor_descriptor
     load_tensor_descriptor
     store_tensor_descriptor
+    make_block_ptr
+    advance
 
 Indexing Ops
 ------------
@@ -145,6 +145,7 @@ Scan/Sort Ops
     cumsum
     histogram
     sort
+    topk
 
 Atomic Ops
 ----------
