@@ -1,5 +1,7 @@
 #include "ascend/include/DynamicCVPipeline/AllocMultiCache/AddMultiBufferOuterScope.h"
 
+#include <set>
+
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/Debug.h"
@@ -10,6 +12,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 
@@ -17,6 +20,8 @@
 #include "ascend/include/DynamicCVPipeline/Common/FlagIdManager.h"
 
 static constexpr const char *DEBUG_TYPE = "AddMultiBufferOuterScope";
+static constexpr const char *kTransferId = "ssbuffer.transfer_id";
+static constexpr const char *kCrossDeps = "ssbuffer.crossDeps";
 #define LDBG(...)                                                              \
   LLVM_DEBUG(llvm::dbgs() << " [" << DEBUG_TYPE << "] " << __VA_ARGS__)
 
@@ -29,6 +34,8 @@ namespace triton {
 
 // Maximum number of flag allocation attempts per transfer group
 static constexpr int kMaxFlagAttempts = 16;
+static constexpr int kMaxTotalFlags = 15;
+static constexpr int kFlagThresholdSingleBuffer = 7;
 
 // --- Attribute helpers ---
 
@@ -222,6 +229,58 @@ static int collectBufferAllocs(const SmallVector<Operation *> &ops,
     info.receiver.markOp = marks[1];
   }
 
+  return 0;
+}
+
+/// Collect llvm.load volatile and llvm.store volatile ops by transfer_id
+static int collectLoadStoreOpsByTransferId(
+    ModuleOp module, DenseMap<int, SmallVector<Operation *>> &loadStoreByTid) {
+  module.walk([&](Operation *op) {
+    if (!op->hasAttr(kTransferId)) {
+      return;
+    }
+    int tid = getTransferId(op);
+    if (tid < 0) {
+      return;
+    }
+    if (isa<mlir::LLVM::LoadOp>(op) || isa<mlir::LLVM::StoreOp>(op)) {
+      loadStoreByTid[tid].push_back(op);
+    }
+  });
+  LDBG("Collected load/store ops for " << loadStoreByTid.size()
+                                       << " transfer groups");
+  return 0;
+}
+
+/// Tag load/store ops with crossDeps (producer=store, consumer=load)
+static int tagLoadStoreOpsWithCrossDeps(
+    DenseMap<int, SmallVector<Operation *>> &loadStoreByTid) {
+  for (auto &p : loadStoreByTid) {
+    int tid = p.first;
+    for (auto *op : p.second) {
+      MLIRContext *ctx = op->getContext();
+      OpBuilder builder(ctx);
+      if (auto storeOp = dyn_cast<mlir::LLVM::StoreOp>(op)) {
+        // producer: crossDeps = {tid, 1}
+        // Tag the defining op of the store's second operand (ptr), not the
+        // store itself
+        Value ptr = storeOp.getOperand(1);
+        if (auto *ptrDefOp = ptr.getDefiningOp()) {
+          ptrDefOp->setAttr(
+              kCrossDeps, builder.getArrayAttr({builder.getI32IntegerAttr(tid),
+                                                builder.getI32IntegerAttr(1)}));
+          LDBG("Tagged ptr-defining-op with crossDeps={tid=" << tid << ", 1}");
+        }
+      } else if (auto loadOp = dyn_cast<mlir::LLVM::LoadOp>(op)) {
+        // consumer: crossDeps = {tid, 0}
+        // Tag the load op itself
+        op->setAttr(kCrossDeps,
+                    builder.getArrayAttr({builder.getI32IntegerAttr(tid),
+                                          builder.getI32IntegerAttr(0)}));
+        LDBG("Tagged llvm.load volatile with crossDeps={tid=" << tid << ", 0}");
+      }
+    }
+  }
   return 0;
 }
 
@@ -427,8 +486,7 @@ static int collectTransferGroupData(
     if (buildTransferGroupData(p.first, p.second, flagIdMgr, info)) {
       continue;
     }
-    if ((info.senderChain.transferOp || info.receiverChain.transferOp) &&
-        info.outputFlag >= 0) {
+    if (info.senderChain.transferOp || info.receiverChain.transferOp) {
       groups[p.first] = info;
     }
   }
@@ -648,9 +706,8 @@ static int createOutputBuffers(DenseMap<int, TransferGroupInfo> &groups,
 
 /// Tag consumer-side alloc and transferOp with crossDeps marks
 static int addConsumerCrossDepsTags(TransferGroupInfo &g, ModuleOp module) {
-  bool consumerIsVector = g.isCtoV;
-  auto &consumerBuf = consumerIsVector ? g.receiverBuf : g.senderBuf;
-  auto &consumerChain = consumerIsVector ? g.receiverChain : g.senderChain;
+  auto &consumerBuf = g.receiverBuf;
+  auto &consumerChain = g.receiverChain;
 
   OpBuilder builder(module.getContext());
 
@@ -1003,6 +1060,39 @@ void AddMultiBufferOuterScopePass::runOnOperation() {
   // Tag consumer-side alloc and transferOp with crossDeps (both modes)
   for (auto &p : groups)
     addConsumerCrossDepsTags(p.second, module);
+
+  // Tag llvm.load/store volatile ops with crossDeps (both modes)
+  DenseMap<int, SmallVector<Operation *>> loadStoreByTid;
+  collectLoadStoreOpsByTransferId(module, loadStoreByTid);
+  tagLoadStoreOpsWithCrossDeps(loadStoreByTid);
+
+  // Check flag ID budget: hardware supports 16 flags (0-15).
+  // Each cross-core double-buffer group needs 2 flags (input + output).
+  std::set<int> usedFlags;
+  module.walk([&](Operation *op) {
+    if (isa<hivm::SyncBlockSetOp>(op) || isa<hivm::SyncBlockWaitOp>(op)) {
+      int f = getFlagFromSyncOp(op);
+      if (f >= 0)
+        usedFlags.insert(f);
+    }
+  });
+  int flagCount = static_cast<int>(usedFlags.size());
+  LDBG("[FlagBudget] used=" << flagCount << " (max=" << (kMaxTotalFlags + 1)
+                            << ")");
+  if (flagCount > kMaxTotalFlags) {
+    LDBG("[FlagBudget] FATAL: flag count "
+         << flagCount << " > " << kMaxTotalFlags << ", halting pass");
+    module->emitError() << "[FlagBudget] flag count " << flagCount << " > "
+                        << kMaxTotalFlags << ", halting pass";
+    signalPassFailure();
+    return;
+  }
+  if (flagCount > kFlagThresholdSingleBuffer) {
+    LDBG("[FlagBudget] flag count " << flagCount << " > "
+                                    << kFlagThresholdSingleBuffer
+                                    << ", forcing single-buffer");
+    isDoubleBuf = false;
+  }
 
   if (isDoubleBuf) {
     LDBG("[Step 2/3] Start: output buffer creation");

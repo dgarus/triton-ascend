@@ -20,11 +20,13 @@
  * THE SOFTWARE.
  */
 
+#include "DynamicCVPipeline/PlanComputeBlock/ReorderOpsByBlockId.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/AddBlockIdForControlOps.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/DataDependencyAnalysis.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/InterCoreTransferAndSync.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/MarkMainLoop.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/PreserveControlAttrsCanonicalize.h"
+#include "ascend/include/DynamicCVPipeline/SplitDataflow/RefineArgsBlockId.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/SeparateCVScope.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflowPass.h"
 #include "mlir/Pass/PassManager.h"
@@ -60,6 +62,10 @@ void SplitDataflowPass::runOnOperation() {
 
   // Step 6: Canonicalize to preserve control flow attributes
   pm.addPass(createPreserveControlAttrsCanonicalizePass());
+
+  // Step 7: Refine block id for iteration variables in main loops
+  pm.addPass(createRefineArgsBlockIdPass());
+  pm.addPass(createReorderOpsByBlockIdPass());
 
   if (failed(runPipeline(pm, module))) {
     module->emitError() << "[" << DEBUG_TYPE << "] Pass failed!";

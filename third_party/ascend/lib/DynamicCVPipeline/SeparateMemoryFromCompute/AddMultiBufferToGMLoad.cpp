@@ -20,15 +20,13 @@
  * THE SOFTWARE.
  */
 
+#include "ascend/include/DynamicCVPipeline/Common/BufferCountManager.h"
 #include "ascend/include/DynamicCVPipeline/SeparateMemoryFromCompute/AddMultiBufferToGMLoadInternal.h"
 #include "ascend/include/DynamicCVPipeline/SeparateMemoryFromCompute/AddMultiBufferToGMLoadPass.h"
 
 using namespace mlir;
 using namespace triton;
 using namespace gmload;
-
-// Default multi-buffer depth for GM load operations.
-static constexpr int kDefaultBufferDepth = 2;
 
 // ============================================================================
 // Step functions
@@ -50,7 +48,8 @@ void AddMultiBufferToGMLoadPass::collectAndGroupMarkedOps() {
 
   // Apply depth policy: skip loops whose compile-time trip count is too small
   // to benefit, then record the slot count on each group.
-  int depth = kDefaultBufferDepth;
+  int depth = BufferCountManager::getInstance().getBufferCountByType(
+      BufferCountManager::DepType::LoadStore);
   llvm::erase_if(contexts_, [depth](const ForBufferCtx &context) {
     if (auto tripCount = getConstantTripCount(context.forOp))
       return *tripCount <= depth;

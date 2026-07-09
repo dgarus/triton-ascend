@@ -40,7 +40,6 @@ static constexpr const char *DEBUG_TYPE = "CreateIfOps";
     llvm::outs() << "\n";                                                      \
   })
 
-using namespace llvm;
 using namespace mlir;
 using namespace triton;
 
@@ -232,7 +231,10 @@ static scf::IfOp createIfOpForBlock(OpBuilder &builder, Location loc,
     ifOp = builder.create<scf::IfOp>(loc, TypeRange{}, trueVal, false);
   }
 
-  ifOp->setAttr("ssbuffer.if", builder.getI32IntegerAttr(blockId));
+  ifOp->setAttr(kSSBufferIfAttr, builder.getI32IntegerAttr(blockId));
+
+  // notify npuir that of the scenario
+  ifOp->setAttr(kHIVMMatmulLimitedInCubeAttr, builder.getUnitAttr());
 
   return ifOp;
 }

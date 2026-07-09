@@ -27,9 +27,15 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include <optional>
 
 namespace mlir {
 namespace triton {
+
+// Attribute names for DynamicCV pipeline
+inline constexpr llvm::StringLiteral kSSBufferIfAttr = "ssbuffer.if";
+inline constexpr llvm::StringLiteral kHIVMMatmulLimitedInCubeAttr =
+    "hivm.matmul_limited_in_cube";
 
 // Collect all nested ops within an operation's regions
 LogicalResult collectAllNestedOps(Operation *op,
@@ -49,6 +55,19 @@ LogicalResult topologicalSort(SmallVector<Operation *> &ops);
 
 // Get block_ids in order of appearance in for loop body
 SmallVector<int> getBlockIdsInOrder(scf::ForOp forOp);
+
+// Get the block_id of the immediate child of scf.for that contains op
+std::optional<int64_t> getForDirectChildBlockId(Operation *op);
+
+// Find the tcb group id that contains value v
+int findTcbGroupId(
+    Value v,
+    llvm::DenseMap<int, SmallVector<Value>> &tightlyCoupledBufferGroups);
+
+// Set isCube/isVector based on the scope's tcore_type attribute
+// Returns failure if scopeOp does not have tcore_type attribute
+LogicalResult getScopeType(Operation *scopeOp, bool &isCube, bool &isVector);
+
 } // namespace triton
 } // namespace mlir
 #endif // TRITON_ADAPTER_DYNAMIC_CV_PIPELINE_UTILS_H

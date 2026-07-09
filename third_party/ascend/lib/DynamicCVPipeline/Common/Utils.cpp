@@ -1,13 +1,13 @@
-#include <cstdint>
 #include <optional>
-#include <string_view>
 
-#include "llvm/IR/PatternMatch.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/FormatVariadic.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/LogicalResult.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -61,6 +61,43 @@ std::optional<int64_t> getOpBlockId(Operation *op) {
   }
 
   return blockIdAttr.getInt();
+}
+
+int getAvailableBlockId(ModuleOp module) {
+  int maxBlockId = -1;
+  module.walk([&](Operation *op) {
+    auto blockIdOpt = getOpBlockId(op);
+    if (blockIdOpt) {
+      int currentId = static_cast<int>(*blockIdOpt);
+      if (currentId > maxBlockId) {
+        maxBlockId = currentId;
+      }
+    }
+  });
+  return maxBlockId + 1;
+}
+
+void setFallbackAttr(ModuleOp module) {
+  OpBuilder builder(module.getContext());
+  module->setAttr(CVPipeline::ERRCODE_ATTR,
+                  builder.getI32IntegerAttr(CVPipeline::ERRCODE_IGNORED));
+}
+
+bool isVectorOnlyOp(Operation *op) {
+  if (!op) {
+    return false;
+  }
+
+  return llvm::TypeSwitch<Operation *, bool>(op)
+      .Case([](linalg::ReduceOp) { return true; })
+      .Case<arith::SelectOp, math::FloorOp>([](Operation *op) {
+        return isa<RankedTensorType>(op->getResult(0).getType());
+      })
+      .Default([](auto) { return false; });
+}
+
+bool isScfOp(Operation *op) {
+  return llvm::isa<scf::SCFDialect>(op->getDialect());
 }
 
 } // namespace CVPipeline

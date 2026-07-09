@@ -248,7 +248,9 @@ static void printDependentMaps(ControlFlowConditionInfo *info) {
     auto &depMap = forEntry.second;
     LDBG("  ForOp (depMap size: " << depMap.size() << "):");
     LDBG("    ");
-    forOp->print(llvm::dbgs(), OpPrintingFlags().skipRegions());
+    LLVM_DEBUG(llvm::dbgs() << '[' << DEBUG_TYPE << "] ";
+               forOp->print(llvm::dbgs(), OpPrintingFlags().skipRegions());
+               llvm::dbgs() << "\n";);
 
     for (auto &entry : depMap) {
       Value consumer = entry.first;
