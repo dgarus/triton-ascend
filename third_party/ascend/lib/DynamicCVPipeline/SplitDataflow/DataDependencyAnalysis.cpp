@@ -23,6 +23,7 @@
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/DataDependencyAnalysis.h"
 #include "ascend/include/DynamicCVPipeline/Common/MemoryEffectsTracker.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
+#include "ascend/include/DynamicCVPipeline/SplitDataflow/Utils.h"
 
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #include "mlir/Analysis/AliasAnalysis.h"
@@ -52,16 +53,13 @@ using namespace mlir::triton;
 using namespace mlir::CVPipeline;
 
 // Attribute name constants
-static constexpr const char *kBlockIdAttr = "ssbuffer.block_id";
-static constexpr const char *kCoreTypeAttr = "ssbuffer.core_type";
-static constexpr const char *kTransferIdAttr = "ssbuffer.transfer_id";
 static constexpr const char *ssbufferCoreTypeCubeAttr = "CUBE";
 static constexpr const char *ssbufferCoreTypeVectorAttr = "VECTOR";
 static constexpr int ND_SHAPE_LENGTH = 2;
 
 // Helper: ssbuffer.core_type
 llvm::StringRef getSsbufferCoreType(Operation *op) {
-  if (auto attr = op->getAttrOfType<mlir::StringAttr>(kCoreTypeAttr)) {
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>(CVPipeline::kCoreType)) {
     return attr.getValue();
   }
   return "";
@@ -88,8 +86,7 @@ llvm::StringRef getCoreTypeWithIndex(Operation *op, int index) {
 bool DataDependencyAnalysisPass::isControlFlowOp(mlir::Operation *op) {
   if (!op)
     return false;
-  return isa<scf::ForOp>(op) || isa<scf::IfOp>(op) || isa<scf::WhileOp>(op) ||
-         isa<scf::YieldOp>(op);
+  return isa<scf::ForOp>(op) || isa<scf::IfOp>(op) || isa<scf::YieldOp>(op);
 }
 
 bool DataDependencyAnalysisPass::isCubeOrVectorOp(mlir::Operation *op) {
@@ -217,7 +214,7 @@ void DataDependencyAnalysisPass::createBlockInfoMap(DataDependencyInfo &info) {
   module.walk([&](mlir::Operation *op) {
     auto opBlockIdOpt = CVPipeline::getOpBlockId(op);
     if (opBlockIdOpt) {
-      int opBlockId = static_cast<int>(*opBlockIdOpt);
+      int opBlockId = *opBlockIdOpt;
       // When the id changes, the block ends && Exclude the initial state
       if (opBlockId != currentId && currentId != startCurrId) {
         collectBlockInfo(info, currentId, currentOps);
@@ -236,7 +233,7 @@ void DataDependencyAnalysisPass::createBlockInfoMap(DataDependencyInfo &info) {
 void DataDependencyAnalysisPass::collectDepInfo(
     mlir::Value depvalue, DependencyType dependencyType,
     llvm::SmallVector<DependencyInfo> &dependencies, int iniProdId,
-    int iniConsId, DataDependencyInfo &info) {
+    int iniConsId, DataDependencyInfo &info, bool isAllTranspoesd) {
   DependencyInfo depInfo;
   depInfo.type = dependencyType;
   depInfo.value = depvalue;
@@ -248,13 +245,17 @@ void DataDependencyAnalysisPass::collectDepInfo(
   if (commonLevelIds.first == -1 || commonLevelIds.second == -1) {
     LOG_DEBUG("Could not find common level block IDs for producer and consumer "
               "blocks");
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
+    return;
   }
 
   depInfo.producerBlockId = commonLevelIds.first;
   depInfo.consumerBlockId = commonLevelIds.second;
   if (isValidScalarDependency(depvalue)) {
     depInfo.isScaler = true;
+  }
+  if (isAllTranspoesd) {
+    depInfo.isAllTranspoesd = true;
   }
   dependencies.push_back(depInfo);
 }
@@ -298,11 +299,8 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(
   builder.setInsertionPointToStart(&bodyBlock);
   Location loc = forOp.getLoc();
   auto constOp = builder.create<arith::ConstantIntOp>(loc, 0, 32);
-  constOp->setAttr(
-      kBlockIdAttr,
-      IntegerAttr::get(IntegerType::get(builder.getContext(), 32), newId));
-  constOp->setAttr(kCoreTypeAttr,
-                   StringAttr::get(builder.getContext(), initCoreType));
+  setOpBlockId(constOp, newId);
+  setOpCoreType(constOp, initCoreType);
 
   BlockInfo blockInfo;
   blockInfo.blockId = newId;
@@ -317,7 +315,7 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(
       LOG_DEBUG("Warning: User block ID not found for iterArg user.\n");
       continue;
     }
-    int userBlockId = static_cast<int>(*userBlockIdOpt);
+    int userBlockId = *userBlockIdOpt;
 
     // Determine dependency type based on initCoreType
     DependencyType depType;
@@ -358,6 +356,30 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(
   }
 }
 
+bool checkYieldCoreType(mlir::Operation *yieldOp) {
+  if (!isa<scf::YieldOp>(yieldOp)) {
+    return false;
+  }
+  for (unsigned index = 0; index < yieldOp->getNumOperands(); ++index) {
+    mlir::Value value = yieldOp->getOperand(index);
+    llvm::StringRef yieldCoreType = getCoreTypeWithIndex(yieldOp, index);
+
+    mlir::Operation *definingOp = value.getDefiningOp();
+    if (!definingOp || !isa<scf::ForOp>(definingOp)) {
+      continue;
+    }
+    auto defResult = dyn_cast<mlir::OpResult>(value);
+    int resultIndex = defResult ? defResult.getResultNumber() : 0;
+    llvm::StringRef definingCoreType =
+        getCoreTypeWithIndex(definingOp, resultIndex);
+
+    if (yieldCoreType != definingCoreType) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Process iterArg dependencies for all scf.for operations in the module.
 // This function iterates through all for loops and checks each iterArg to
 // determine if there are cross-core-type data dependencies.
@@ -373,7 +395,11 @@ void DataDependencyAnalysisPass::processIterArgDependencies() {
   // Step2: Process each iterArg of each scf.for operation
   for (scf::ForOp forOp : forOps) {
     size_t numIterArgs = forOp.getInitArgs().size();
-
+    mlir::Operation *yieldOp = forOp.getBody()->getTerminator();
+    if (!checkYieldCoreType(yieldOp)) {
+      LOG_DEBUG("[ERROR]: Yield core type mismatch defining op\n");
+      signalPassFailure();
+    }
     for (int iterArgIndex = 0; iterArgIndex < numIterArgs; ++iterArgIndex) {
       mlir::Value initValue = forOp.getInits()[iterArgIndex];
       mlir::BlockArgument iterArg = forOp.getRegionIterArg(iterArgIndex);
@@ -416,7 +442,8 @@ void DataDependencyAnalysisPass::processIterArgDependencies() {
           }
         }
         LOG_DEBUG("iterarg init core_type conflicts with yield");
-        signalPassFailure();
+        CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
+        return;
       }
 
       auto diffUsers = collectDiffCoreTypeUsers(iterArg, initCoreType);
@@ -475,7 +502,7 @@ void DataDependencyAnalysisPass::analyzeExternalInputs(
               "Warning: [v->c] Producer block ID not found for input value.\n");
           continue;
         }
-        int producerId = static_cast<int>(*producerIdOpt);
+        int producerId = *producerIdOpt;
         collectDepInfo(input, DependencyType::VectorToCube, v2cDependencies,
                        producerId, blockInfo.blockId, info);
       }
@@ -518,6 +545,30 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(
 
       // Check who is using this output
       llvm::DenseSet<int> handledBlockIds;
+
+      // if c->v value will be transposed and then used by vector op, the value
+      // can be transposed within fixpipe
+      bool isAllTranspoesd = true;
+      for (mlir::Operation *user : output.getUsers()) {
+        if (!isa<linalg::TransposeOp>(user)) {
+          isAllTranspoesd = false;
+          continue;
+        }
+        for (mlir::Operation *transposeOpUser : user->getUsers()) {
+          if (getSsbufferCoreType(transposeOpUser) !=
+              ssbufferCoreTypeVectorAttr) {
+            isAllTranspoesd = false;
+            continue;
+          }
+        }
+      }
+      if (isAllTranspoesd) {
+        for (mlir::Operation *user : output.getUsers()) {
+          auto transposedValue = user->getResults()[0];
+          transposedValue.replaceAllUsesWith(opResult);
+        }
+      }
+
       for (mlir::Operation *user : output.getUsers()) {
         int outputIndex = 0;
         if (isControlFlowOp(user)) {
@@ -543,12 +594,12 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(
                       "operation.\n");
             continue;
           }
-          int consumerId = static_cast<int>(*consumerIdOpt);
+          int consumerId = *consumerIdOpt;
           auto inserted = handledBlockIds.insert(consumerId).second;
           if (inserted) {
             collectDepInfo(output, DependencyType::CubeToVector,
-                           c2vDependencies, blockInfo.blockId, consumerId,
-                           info);
+                           c2vDependencies, blockInfo.blockId, consumerId, info,
+                           isAllTranspoesd);
           }
         }
         // If user belongs to Cube block, this C->C dependency was handled
@@ -562,7 +613,8 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(
 void DataDependencyAnalysisPass::collectMemDepInfo(
     llvm::StringRef predCoreType, int producerBlockId, int consumerBlockId,
     int predBlockId, int currBlockId,
-    llvm::SmallVector<DependencyInfo> &memoryDependencies) {
+    llvm::SmallVector<DependencyInfo> &memoryDependencies,
+    mlir::Operation *predOp, mlir::Operation *nextOp) {
   DependencyInfo depInfo;
 
   if (predCoreType == ssbufferCoreTypeCubeAttr) {
@@ -575,6 +627,9 @@ void DataDependencyAnalysisPass::collectMemDepInfo(
   depInfo.iniProducerBlockId = predBlockId;
   depInfo.iniConsumerBlockId = currBlockId;
 
+  depInfo.predOp = predOp;
+  depInfo.nextOp = nextOp;
+
   memoryDependencies.push_back(depInfo);
 }
 
@@ -585,19 +640,19 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info) {
   auto &aliasAnalysis = getAnalysis<mlir::AliasAnalysis>();
   MemoryDependenceGraph memDepGraph(module, aliasAnalysis);
 
-  module.walk([&](mlir::Operation *op) {
+  auto walkResult = module.walk([&](mlir::Operation *op) -> WalkResult {
     if (op->getNumRegions() > 0) {
-      return;
+      return WalkResult::advance();
     }
     if (isa<annotation::MarkOp, gpu::BarrierOp>(op)) {
-      return;
+      return WalkResult::advance();
     }
     auto currBlockIdOpt = CVPipeline::getOpBlockId(op);
     llvm::StringRef currCoreType = getSsbufferCoreType(op);
     if (!currBlockIdOpt || currCoreType.empty()) {
-      return;
+      return WalkResult::advance();
     }
-    int currBlockId = static_cast<int>(*currBlockIdOpt);
+    int currBlockId = *currBlockIdOpt;
 
     for (mlir::Operation *predOp : memDepGraph.getExecBefore(op)) {
       if (isa<annotation::MarkOp, gpu::BarrierOp>(predOp)) {
@@ -606,7 +661,7 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info) {
       if (predOp->getNumRegions() > 0) {
         auto realdeps = memDepGraph.getRealDependency(predOp, op);
         if (realdeps.empty()) {
-          return;
+          return WalkResult::advance();
         }
         for (mlir::Operation *realPredOp : realdeps) {
           if (isa<annotation::MarkOp, gpu::BarrierOp>(realPredOp)) {
@@ -624,10 +679,11 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info) {
           if (producerBlockId == -1 || consumerBlockId == -1) {
             LOG_DEBUG("Could not find common level block IDs for producer and "
                       "consumer blocks");
-            signalPassFailure();
+            return WalkResult::interrupt();
           }
           collectMemDepInfo(realPredCoreType, producerBlockId, consumerBlockId,
-                            realPredBlockId, currBlockId, memoryDependencies);
+                            realPredBlockId, currBlockId, memoryDependencies,
+                            realPredOp, op);
 
           LOG_DEBUG("\n=op with region mem dep analysis= "
                     << "\nrealpredcoretype" << realPredCoreType
@@ -643,21 +699,22 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info) {
           predCoreType.empty()) {
         continue;
       }
-      int predBlockId = static_cast<int>(*predBlockIdOpt);
+      int predBlockId = *predBlockIdOpt;
 
       auto [producerBlockId, consumerBlockId] =
           findCommonLevelBlockIds(info, predBlockId, currBlockId);
       if (producerBlockId == -1 || consumerBlockId == -1) {
         LOG_DEBUG("Could not find common level block IDs for producer and "
                   "consumer blocks");
-        signalPassFailure();
+        return WalkResult::interrupt();
       }
       if (producerBlockId == consumerBlockId) {
         continue;
       }
 
       collectMemDepInfo(predCoreType, producerBlockId, consumerBlockId,
-                        predBlockId, currBlockId, memoryDependencies);
+                        predBlockId, currBlockId, memoryDependencies, predOp,
+                        op);
 
       LOG_DEBUG("\n=mem dep analysis= " << "\npredcoretype" << predCoreType
                                         << "\nproducer Block: " << predBlockId
@@ -665,7 +722,11 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info) {
                                         << "\nconsumer Block: " << currBlockId
                                         << "\nconsumer Op: " << *op << "\n");
     }
+    return WalkResult::advance();
   });
+  if (walkResult.wasInterrupted()) {
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
+  }
   LOG_DEBUG("=== mem dep analysis complete ===\n");
 }
 
@@ -777,8 +838,8 @@ std::pair<int, int> DataDependencyAnalysisPass::findCommonLevelBlockIds(
       mlir::Operation *pPrevOp = pAncestors[pIndex - 1];
       auto pPrevIdOpt = CVPipeline::getOpBlockId(pPrevOp);
       auto cPrevIdOpt = CVPipeline::getOpBlockId(before);
-      int pPrevId = pPrevIdOpt ? static_cast<int>(*pPrevIdOpt) : -1;
-      int cPrevId = cPrevIdOpt ? static_cast<int>(*cPrevIdOpt) : -1;
+      int pPrevId = pPrevIdOpt ? *pPrevIdOpt : -1;
+      int cPrevId = cPrevIdOpt ? *cPrevIdOpt : -1;
       if (!pPrevIdOpt) {
         LOG_DEBUG("Warning: Producer ancestor operation has no block ID "
                   "attribute.\n");
@@ -803,6 +864,10 @@ std::pair<int, int> DataDependencyAnalysisPass::findCommonLevelBlockIds(
 void DataDependencyAnalysisPass::runOnOperation() {
   LOG_DEBUG("\n--- enter DataDependencyAnalysisPass --->\n");
   module = getOperation();
+
+  if (CVPipeline::hasFallbackAttr(module)) {
+    return;
+  }
 
   auto &info = getAnalysis<DataDependencyInfo>();
 

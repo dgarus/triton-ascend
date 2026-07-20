@@ -40,14 +40,7 @@ using namespace triton;
 
 namespace {
 
-static constexpr llvm::StringLiteral interceptrFunc[]{
-    "_attn_bwd",
-    "lightning_indexer_grad_kernel",
-    "bwd_qkv_kernel",
-    "parallel_nsa_compression_fwd_kernel",
-    "parallel_nsa_compression_bwd_kernel_dq",
-    "chunk_dplr_fwd_kernel_h",
-};
+static constexpr llvm::StringLiteral interceptrFunc[]{""};
 
 static LogicalResult verifyFuncNames(ModuleOp module) {
   bool intercepted = false;
@@ -75,11 +68,14 @@ static LogicalResult verifyFuncNames(ModuleOp module) {
 void AnalyzeNamePass::runOnOperation() {
   ModuleOp module = getOperation();
 
+  if (CVPipeline::hasFallbackAttr(module)) {
+    return;
+  }
+
   LDBG("Before AnalyzeName:\n" << module << "\n");
 
   if (failed(verifyFuncNames(module))) {
-    CVPipeline::setFallbackAttr(module);
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_IGNORED);
     return;
   }
 

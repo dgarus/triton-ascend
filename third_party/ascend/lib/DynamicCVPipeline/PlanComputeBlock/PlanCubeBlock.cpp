@@ -533,7 +533,8 @@ static bool checkValidUserSeed(Operation *op) {
              ViewLikeOpInterface, tensor::ExtractSliceOp>(op);
 }
 SmallVector<Operation *>
-PlanCubeBlockPass::matchSeed(Operation *dotOp, ComputeBlockIdManager &bm) {
+PlanCubeBlockPass::matchSeed(Operation *dotOp, ComputeBlockIdManager &bm,
+                             const MemoryDependenceGraph &memGraph) {
   // match inputs
   SmallVector<Operation *> ret;
   ret.push_back(dotOp);
@@ -543,7 +544,7 @@ PlanCubeBlockPass::matchSeed(Operation *dotOp, ComputeBlockIdManager &bm) {
       continue;
     if (checkValidInputSeed(def) && isCubeOp(def) &&
         dotOp->getBlock() == def->getBlock() && bm.getBlockIdByOp(def) == -1) {
-      if (def->hasOneUse()) {
+      if (CVPipeline::isOnlyDirectlyUse(def, dotOp, memGraph)) {
         ret.push_back(def);
       }
     }
@@ -583,7 +584,7 @@ llvm::LogicalResult PlanCubeBlockPass::processBlockWithCubeBFS(
       continue;
     }
     auto temBlockId = bm.getNextId();
-    llvm::SmallVector<Operation *> dotSeeds = matchSeed(dot, bm);
+    llvm::SmallVector<Operation *> dotSeeds = matchSeed(dot, bm, memGraph);
     if (willCreateCycle(dotSeeds, memGraph, temBlockId, bm)) {
       LOG_DEBUG("Cube Seed already have a cycle!!");
       for (auto seed : dotSeeds) {
@@ -617,6 +618,11 @@ void mlir::triton::PlanCubeBlockPass::runOnOperation() {
   LOG_DEBUG(
       "\n--- Step 2: Partitioning compute blocks for cube operations --->\n");
   auto moduleOp = getOperation();
+
+  if (CVPipeline::hasFallbackAttr(moduleOp)) {
+    return;
+  }
+
   auto &aa = getAnalysis<AliasAnalysis>();
   auto memGraph = MemoryDependenceGraph(moduleOp, aa);
   auto bm = ComputeBlockIdManager(moduleOp);
@@ -630,7 +636,7 @@ void mlir::triton::PlanCubeBlockPass::runOnOperation() {
     return WalkResult::advance();
   });
   if (result.wasInterrupted()) {
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(moduleOp, CVPipeline::ERRCODE_FAILED);
   }
   LOG_DEBUG("\n--- Step 2: end --->\n");
 }

@@ -31,10 +31,8 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/OpDefinition.h"
-#include "mlir/Interfaces/CastInterfaces.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/TypeSize.h"
@@ -51,7 +49,6 @@ namespace {
 struct FillInfo {
   linalg::FillOp fillOp;
   scf::IfOp parentIf;
-  bool needsSplit;
 };
 
 /**
@@ -105,7 +102,7 @@ static LogicalResult getCommonBlockId(ArrayRef<Operation *> ops, int &blockId) {
       for (auto *user : op->getUsers()) {
         if (auto copyOp = dyn_cast<memref::CopyOp>(user)) {
           if (auto blockId = CVPipeline::getOpBlockId(copyOp)) {
-            copyBlockIds.insert(static_cast<int>(*blockId));
+            copyBlockIds.insert(*blockId);
           }
         }
       }
@@ -130,77 +127,6 @@ static LogicalResult getCommonBlockId(ArrayRef<Operation *> ops, int &blockId) {
 
   blockId = *copyBlockIds.begin();
   return success();
-}
-
-/**
- * @brief Collect predecessor operations in a block for a given value
- *
- * This function traces back through SSA dependencies to find all operations
- * that affect the given startValue within a specific block.
- *
- * Special handling for scf.for loop-carried dependencies:
- * When an operand is a BlockArgument from scf.for iter_arg, we also trace
- * through the yieldOp to find the operation that provides the yielded value.
- * This ensures we capture operations that update loop-carried variables
- * (e.g., %79 that updates %arg19).
- *
- * @param startValue The value to trace back from
- * @param block The block to search within
- * @return SmallVector<Operation*> List of predecessor operations
- */
-static SmallVector<Operation *> collectBlockPredecessors(Value startValue,
-                                                         Block *block) {
-  SmallVector<Operation *> result;
-  SmallVector<Operation *> toProcess;
-
-  auto addToProcess = [&](Operation *op) {
-    if (auto *ancestorInBlock = CVPipeline::getAncestorInBlock(op, block)) {
-      if (!llvm::is_contained(result, ancestorInBlock)) {
-        toProcess.push_back(ancestorInBlock);
-      }
-    }
-  };
-
-  if (auto *condDefOp = startValue.getDefiningOp()) {
-    addToProcess(condDefOp);
-  }
-
-  while (!toProcess.empty()) {
-    auto *op = toProcess.pop_back_val();
-    if (llvm::is_contained(result, op)) {
-      continue;
-    }
-    result.push_back(op);
-
-    for (auto operand : op->getOperands()) {
-      if (auto *defOp = operand.getDefiningOp()) {
-        // SSA operand: trace to its defining operation
-        addToProcess(defOp);
-      } else if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
-        // Block argument: check if it's from scf.for iter_arg
-        Operation *parentOp = blockArg.getOwner()->getParentOp();
-        if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
-          unsigned argIdx = blockArg.getArgNumber();
-          // argIdx == 0 is the loop variable, not iter_arg; skip invalid
-          // indices
-          if (argIdx == 0 || argIdx > forOp.getInitArgs().size()) {
-            continue;
-          }
-          Operation *yieldOp = forOp.getBody()->getTerminator();
-          if (!isa<scf::YieldOp>(yieldOp) ||
-              argIdx > yieldOp->getNumOperands()) {
-            continue;
-          }
-          // Get the value yielded for this iter_arg and trace its defining op
-          Value yieldedValue = yieldOp->getOperand(argIdx - 1);
-          if (auto *yieldedDef = yieldedValue.getDefiningOp()) {
-            addToProcess(yieldedDef);
-          }
-        }
-      }
-    }
-  }
-  return result;
 }
 
 /**
@@ -382,37 +308,24 @@ tryUnifyForAlloc(memref::AllocOp allocOp,
     fillInfo = splitSCFIfIfNeeded(fillInfo);
   }
 
-  // Step5: Collect predecessor_ops for scf.if condition
-  SmallVector<Operation *> conditionOps = collectBlockPredecessors(
-      fillInfo.parentIf.getCondition(), fillInfo.parentIf->getBlock());
-
-  // Step6: Cycle detection and block_id assignment with fallback
+  // Step5: Cycle detection and block_id assignment
   SmallVector<Operation *> coreOps = {
       allocOp.getOperation(),
       fillInfo.fillOp.getOperation(),
       fillInfo.parentIf.getOperation(),
   };
   coreOps.append(directUsers);
-  SmallVector<Operation *> allOps = coreOps;
-  // allOps include coreOps and scf.if_condition's predecessor_ops
-  allOps.append(conditionOps);
 
-  if (CVPipeline::willCreateCycle(allOps, memGraph, targetBlockId, bm)) {
-    LOG_DEBUG("[Cycle detection] First time: Find cycle with conditionOps, "
-              "retry without conditionOps");
-    if (CVPipeline::willCreateCycle(coreOps, memGraph, targetBlockId, bm)) {
-      LOG_DEBUG("[Cycle detection] Second time: Find Cycle, have unsupport IR! "
-                "Should Check!!");
-      return success();
-    }
-    for (auto *op : coreOps) {
-      bm.updateBlockId(op, targetBlockId);
-    }
-  } else {
-    for (auto *op : allOps) {
-      bm.updateBlockId(op, targetBlockId);
-    }
+  if (CVPipeline::willCreateCycle(coreOps, memGraph, targetBlockId, bm)) {
+    LOG_DEBUG(
+        "[Cycle detection] Find cycle, have unsupport IR! Should Check!!");
+    return success();
   }
+  for (auto *op : coreOps) {
+    bm.updateBlockId(op, targetBlockId);
+  }
+  LOG_DEBUG("[tryUnifyForAlloc] Successfully unify block_id to "
+            << targetBlockId << " for allocOp: " << *allocOp);
   return success();
 }
 
@@ -434,6 +347,11 @@ public:
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+
+    if (CVPipeline::hasFallbackAttr(module)) {
+      return;
+    }
+
     LOG_DEBUG("Before: " << *module << "\n");
     auto &aa = getAnalysis<AliasAnalysis>();
     CVPipeline::MemoryDependenceGraph memGraph(module, aa);
@@ -445,7 +363,8 @@ public:
 
     for (memref::AllocOp allocOp : allocOps) {
       if (failed(tryUnifyForAlloc(allocOp, memGraph, bm))) {
-        signalPassFailure();
+        CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
+        return;
       }
     }
 

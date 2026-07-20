@@ -434,6 +434,28 @@ std::pair<int, int> UpdateLoopIterTimesPass::calculateFactor(scf::ForOp forOp) {
     }
   }
 
+  // Step3: Calculate factor based on iteration dependencies (tensor iter_args
+  // dependencies)
+  bool hasIterDeps = info->tensorIterArgDepsMap.count(forOp) &&
+                     !info->tensorIterArgDepsMap[forOp].empty();
+
+  if (hasIterDeps) {
+    LDBG("find cross-iteration dependency, size: "
+         << info->tensorIterArgDepsMap[forOp].size());
+    auto [iterRequiredBuffers, iterX] =
+        calculateIterDepsFactor(forOp, ifOps, ifOpIndex);
+    if (iterRequiredBuffers == -1 || iterX == -1) {
+      LDBG("calculateIterDepsFactor failed!");
+      return {-1, -1};
+    }
+    // Compare iterRequiredBuffers/iterX vs maxRequiredBuffers/maxX
+    // Take the larger fraction
+    if (iterRequiredBuffers * maxX > maxRequiredBuffers * iterX) {
+      maxRequiredBuffers = iterRequiredBuffers;
+      maxX = iterX;
+    }
+  }
+
   return {maxRequiredBuffers, maxX};
 }
 
@@ -675,6 +697,82 @@ std::pair<int, int> UpdateLoopIterTimesPass::calculateCrossDepsFactor(
     if (requiredBuffers * maxX > maxRequiredBuffers * x) {
       maxRequiredBuffers = requiredBuffers;
       maxX = x;
+    }
+  }
+
+  return {maxRequiredBuffers, maxX};
+}
+
+// calculateIterDepsFactor computes the buffer factor based on iteration
+// dependencies For iter deps: consumer and producer are IfOps within the same
+// forOp Core idea: iteration dependencies are special - consume first, then
+// produce So if consumer ifOp (m) and producer ifOp (n) have dependency, we
+// need (n - m) buffers to support the loop extension This function iterates all
+// dependencies from tensorIterArgDepsMap and finds the maximum required buffer
+// count
+std::pair<int, int> UpdateLoopIterTimesPass::calculateIterDepsFactor(
+    scf::ForOp forOp, SmallVector<scf::IfOp> &ifOps,
+    DenseMap<Operation *, int> &ifOpIndex) {
+  int maxRequiredBuffers = 1;
+  int maxX = 1;
+
+  // Check if this forOp has iteration dependencies
+  if (!info->tensorIterArgDepsMap.count(forOp)) {
+    return {maxRequiredBuffers, maxX};
+  }
+
+  auto &iterArgDepsVec = info->tensorIterArgDepsMap[forOp];
+
+  // Iterate all tensor iter_args dependencies in this forOp
+  // tensorIterArgDepsMap now stores a SmallVector of TensorIterArgIfOpRelation
+  for (TensorIterArgIfOpRelation &relation : iterArgDepsVec) {
+    scf::IfOp producerIfOp = relation.producer;
+    llvm::SmallVector<scf::IfOp> &consumerIfOps = relation.consumers;
+
+    // Skip if no producer or consumers
+    if (!producerIfOp || consumerIfOps.empty()) {
+      continue;
+    }
+
+    // x is the number of producer buffers (1 for iteration dependencies)
+    int x = 1;
+
+    // Get producer IfOp index (n)
+    auto producerIt = ifOpIndex.find(producerIfOp.getOperation());
+    if (producerIt == ifOpIndex.end()) {
+      LDBG("Producer IfOp not found in ifOps list!");
+      return {-1, -1};
+    }
+    int n = producerIt->second;
+
+    // For each consumer IfOp, find its index (m)
+    // Calculate requiredBuffers = n - m (consume first, then produce)
+    for (scf::IfOp consumerIfOp : consumerIfOps) {
+      // Find consumer IfOp index in ifOps list
+      auto consumerIt = ifOpIndex.find(consumerIfOp.getOperation());
+      if (consumerIt == ifOpIndex.end()) {
+        LDBG("Consumer IfOp not found in ifOps list!");
+        return {-1, -1};
+      }
+      int m = consumerIt->second;
+
+      if (n <= m) {
+        LDBG("Producer IfOp index (n) is not greater than consumer IfOp index "
+             "(m)!");
+        LDBG("arg value: " << relation.iterArg);
+        LDBG("Producer IfOp index n: " << n);
+        LDBG("consumer IfOp index m: " << m);
+        return {-1, -1};
+      }
+      int requiredBuffers = n - m + 1;
+      LDBG("consumerIfOp : " << consumerIfOp);
+      LDBG("consumer m: " << m << ", n: " << n);
+      LDBG("requiredBuffers: " << requiredBuffers);
+
+      if (requiredBuffers * maxX > maxRequiredBuffers * x) {
+        maxRequiredBuffers = requiredBuffers;
+        maxX = x;
+      }
     }
   }
 
@@ -1129,6 +1227,10 @@ int UpdateLoopIterTimesPass::UpdateForLoopIteration(
 void UpdateLoopIterTimesPass::runOnOperation() {
   ModuleOp module = getOperation();
 
+  if (CVPipeline::hasFallbackAttr(module)) {
+    return;
+  }
+
   LDBG("before updateloopitertimes:\n" << module);
   LDBG("\nEnter UpdateLoopIterTimesPass!");
 
@@ -1140,7 +1242,7 @@ void UpdateLoopIterTimesPass::runOnOperation() {
   ret = GetMainLoopIdToLoopOpMap(module, cmap, vmap);
   if (ret != 0) {
     LDBG("GetMainLoopIdToLoopOpMap Failed!");
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
   }
 
   // step2: Calculate info for each loop operation, store into the same
@@ -1149,12 +1251,12 @@ void UpdateLoopIterTimesPass::runOnOperation() {
   ret = ComputeMainLoopTimes(cmap, infoMap);
   if (ret != 0) {
     LDBG("ComputeMainLoopTimes from cube Failed!");
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
   }
   ret = ComputeMainLoopTimes(vmap, infoMap);
   if (ret != 0) {
     LDBG("ComputeMainLoopTimes from vector Failed!");
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
   }
 
   // step3: Update loop iteration count (process loop operations with same id
@@ -1162,7 +1264,7 @@ void UpdateLoopIterTimesPass::runOnOperation() {
   ret = UpdateForLoopIteration(cmap, vmap, infoMap);
   if (ret != 0) {
     LDBG("Update ForLoop Iteration Failed!");
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
   }
   LDBG("after UpdateForLoopIteration:\n" << module);
 
@@ -1170,7 +1272,7 @@ void UpdateLoopIterTimesPass::runOnOperation() {
   ret = replaceForOpCounterInIfOps();
   if (ret != 0) {
     LDBG("replaceForOpCounterInIfOps Failed!");
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
   }
 
   LDBG("after updateloopitertimes:\n" << module);

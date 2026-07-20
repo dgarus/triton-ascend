@@ -22,6 +22,7 @@
 
 #include "ascend/include/DynamicCVPipeline/SeparateMemoryFromComputePass.h"
 #include "ascend/include/DynamicCVPipeline/Common/BufferCountManager.h"
+#include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "ascend/include/DynamicCVPipeline/SeparateMemoryFromCompute/AddMultiBufferToGMLoadPass.h"
 #include "ascend/include/DynamicCVPipeline/SeparateMemoryFromCompute/AsyncLoadHoistingPass.h"
 #include "mlir/Pass/PassManager.h"
@@ -37,7 +38,11 @@ using namespace triton;
 void SeparateMemoryFromComputePass::runOnOperation() {
   ModuleOp module = getOperation();
 
-  int depth = BufferCountManager::getInstance().getBufferCountByType(
+  if (CVPipeline::hasFallbackAttr(module)) {
+    return;
+  }
+
+  int depth = BufferCountManager(module).getBufferCountByType(
       BufferCountManager::DepType::LoadStore);
 
   if (depth <= 1) {
@@ -56,7 +61,10 @@ void SeparateMemoryFromComputePass::runOnOperation() {
 
   if (failed(runPipeline(pm, module))) {
     module->emitError() << "[" << DEBUG_TYPE << "] Pass failed!";
-    signalPassFailure();
+    if (!CVPipeline::hasFallbackAttr(module)) {
+      CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
+    }
+    return;
   }
 
   LDBG("Process successfully");

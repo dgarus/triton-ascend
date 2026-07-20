@@ -20,21 +20,27 @@
  * THE SOFTWARE.
  */
 
+#include <cstddef>
+#include <optional>
+
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
-#include <cstddef>
-#include <optional>
+#include "llvm/Support/raw_ostream.h"
 
+#include "bishengir/Dialect/Utils/Util.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dominance.h"
@@ -45,7 +51,6 @@
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/ViewLikeInterface.h"
 #include "mlir/Support/LLVM.h"
-#include "llvm/ADT/SmallVector.h"
 
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "ascend/include/DynamicCVPipeline/StandardizeOp/PatternMatchRewrites.h"
@@ -61,6 +66,8 @@ using namespace CVSplit;
 static constexpr const char *DEBUG_TYPE = "SplitMatmul";
 #define LOG_DEBUG(...)                                                         \
   LLVM_DEBUG(llvm::dbgs() << "\n[" << DEBUG_TYPE << "] " << __VA_ARGS__ << "\n")
+
+constexpr llvm::StringLiteral kMatmulAtLeastOnceHint = "matmul_at_least_once";
 
 namespace {
 
@@ -104,6 +111,23 @@ static bool operationIsFillZero(Operation *op) {
 static bool isFloatOrInt(RankedTensorType tensorType) {
   auto elmType = tensorType.getElementType();
   return isa<FloatType, IntegerType>(elmType);
+}
+
+static bool scfMayNotExec(Operation *op) {
+  return llvm::TypeSwitch<Operation *, bool>(op)
+      .Case([&](scf::ForOp forOp) {
+        IntegerAttr ubAttr;
+        IntegerAttr lbAttr;
+        if (matchPattern(forOp.getUpperBound(), m_Constant(&ubAttr)) &&
+            matchPattern(forOp.getLowerBound(), m_Constant(&lbAttr))) {
+          return ubAttr.getValue().sle(lbAttr.getValue());
+        }
+        return true;
+      })
+      .Case([&](scf::IfOp ifOp) {
+        return !matchPattern(ifOp.getCondition(), m_One());
+      })
+      .Default([&](auto) { return false; });
 }
 
 /**
@@ -199,21 +223,7 @@ static Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul,
     return nextValueOfC;
   }
   // update mayNotExec
-  if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
-    IntegerAttr ubAttr, lbAttr;
-    if (matchPattern(forOp.getUpperBound(), m_Constant(&ubAttr)) &&
-        matchPattern(forOp.getLowerBound(), m_Constant(&lbAttr))) {
-      if (ubAttr.getValue().sle(lbAttr.getValue())) {
-        mayNotExec = true;
-      }
-    } else {
-      mayNotExec = true;
-    }
-  } else if (auto ifOp = dyn_cast<scf::IfOp>(parentOp)) {
-    if (!matchPattern(ifOp.getCondition(), m_One())) {
-      mayNotExec = true;
-    }
-  }
+  mayNotExec = mayNotExec || scfMayNotExec(parentOp);
   return searchInArgsChain(nextSearchValue, argsLimitedInMatmul, mayNotExec,
                            outerInValue);
 }
@@ -519,6 +529,25 @@ static bool verifyMatmul(linalg::MatmulOp matmulOp) {
   return true;
 }
 
+// Supports the most common case, where a loop-carried matmul is
+// directly under a not executed for-loop
+static std::optional<SplitInfo> handleMayNotExec(linalg::MatmulOp matmulOp) {
+  auto *parentOp = matmulOp->getBlock()->getParentOp();
+  auto forOp = llvm::dyn_cast<scf::ForOp>(parentOp);
+  auto inputs = parseMatmulInputs(matmulOp);
+  auto bias = inputs.bias;
+  if (!forOp || !scfMayNotExec(forOp)) {
+    return std::nullopt;
+  }
+  auto blockArg = llvm::dyn_cast<BlockArgument>(bias);
+  if (!blockArg || blockArg.getOwner()->getParentOp() != forOp) {
+    return std::nullopt;
+  }
+  auto initVal = forOp.getTiedLoopInit(blockArg)->get();
+  auto result = forOp.getTiedLoopResult(blockArg);
+  return SplitInfo{true, initVal, result, true};
+}
+
 /**
  * Determines whether a matmul operation should be split based on comprehensive
  * analysis. This function performs a complete analysis of the matmul
@@ -557,9 +586,20 @@ static std::optional<SplitInfo> shouldSplit(linalg::MatmulOp matmulOp,
   Value outerInValue = matmulInput.bias;
   auto outerOutValue = searchInArgsChain(
       matmulOp.getResult(0), argsLimitedInMatmul, mayNotExec, outerInValue);
+  if (utils::getAnnotateOpWithAttr(outerOutValue, kMatmulAtLeastOnceHint)
+          .has_value()) {
+    mayNotExec = false;
+  }
   if (!argsLimitedInMatmul) {
     LOG_DEBUG("Split because bias is not limited in args" << matmulOp); // S25
     return SplitInfo{mayNotExec, outerInValue, outerOutValue, true};
+  }
+
+  if (mayNotExec) {
+    auto splitInfoOpt = handleMayNotExec(matmulOp);
+    if (splitInfoOpt.has_value()) {
+      return splitInfoOpt;
+    }
   }
 
   if (!shouldSplitByInput(matmulOp, outerOutValue, outerInValue) &&
@@ -570,15 +610,16 @@ static std::optional<SplitInfo> shouldSplit(linalg::MatmulOp matmulOp,
   return SplitInfo{mayNotExec, outerInValue, outerOutValue, true};
 }
 
-static void splitMatmul(linalg::MatmulOp matmulOp, PatternRewriter &rewriter,
-                        SplitInfo splitInfo) {
+static LogicalResult splitMatmul(linalg::MatmulOp matmulOp,
+                                 PatternRewriter &rewriter,
+                                 SplitInfo splitInfo) {
   auto outputType =
       dyn_cast<RankedTensorType>(parseMatmulInputs(matmulOp).bias.getType());
   if (!outputType) {
     LOG_DEBUG("Not tensor mode: " << matmulOp
                                   << "; the caller does not ensure the "
                                      "assumption. Cowardly doing nothing");
-    return;
+    return failure();
   }
   auto elmType = outputType.getElementType();
 
@@ -597,53 +638,111 @@ static void splitMatmul(linalg::MatmulOp matmulOp, PatternRewriter &rewriter,
   }
   auto emptyOp =
       rewriter.create<tensor::EmptyOp>(loc, outputType, dynamicSizes);
-  splitInfo.outerInValue.replaceUsesWithIf(
-      emptyOp->getResult(0),
-      [&](OpOperand &opop) { return opop.getOwner() == outerDefOp; });
-
-  // [Step 2] Create new matmul using zero-filled tensor as accumulator
-  // New matmul runs entirely on CUBE with no VECTOR dependency
-  auto inputs = parseMatmulInputs(matmulOp);
-  auto a = inputs.a;
-  auto b = inputs.b;
-  auto bias = inputs.bias;
-  rewriter.setInsertionPoint(matmulOp);
-  auto newMatmul = rewriter.create<linalg::MatmulOp>(loc, ValueRange{a, b},
-                                                     ValueRange{bias});
-  NamedAttrList attrs(matmulOp->getAttrDictionary());
-  constexpr StringLiteral kShouldRemoveAttrs[] = {"operandSegmentSizes",
-                                                  "res_attrs", "arg_attrs"};
-  for (auto attr : kShouldRemoveAttrs) {
-    attrs.erase(attr);
+  Value zeroValue;
+  if (auto floatType = dyn_cast<FloatType>(elmType)) {
+    APFloat zeroAPFloat = APFloat::getZero(floatType.getFloatSemantics());
+    zeroValue =
+        rewriter.create<arith::ConstantFloatOp>(loc, floatType, zeroAPFloat)
+            .getResult();
+  } else if (auto intType = dyn_cast<IntegerType>(elmType)) {
+    zeroValue =
+        rewriter.create<arith::ConstantIntOp>(loc, intType, 0).getResult();
   }
-  newMatmul->setAttrs(attrs);
+  auto fillOp = rewriter.create<linalg::FillOp>(emptyOp.getLoc(), zeroValue,
+                                                emptyOp.getResult());
+  auto zeroVal = fillOp.getResult(0);
+  splitInfo.outerInValue.replaceUsesWithIf(
+      zeroVal, [&](OpOperand &opop) { return opop.getOwner() == outerDefOp; });
+
+  auto forOp = llvm::dyn_cast_if_present<scf::ForOp>(
+      splitInfo.outerOutValue.getDefiningOp());
+  if (!splitInfo.mayNotExec || !forOp) {
+    // [Step 2] Create new matmul using zero-filled tensor as accumulator
+    // New matmul runs entirely on CUBE with no VECTOR dependency
+    auto inputs = parseMatmulInputs(matmulOp);
+    auto a = inputs.a;
+    auto b = inputs.b;
+    auto bias = inputs.bias;
+    rewriter.setInsertionPoint(matmulOp);
+    auto newMatmul = rewriter.create<linalg::MatmulOp>(loc, ValueRange{a, b},
+                                                       ValueRange{bias});
+    NamedAttrList attrs(matmulOp->getAttrDictionary());
+    constexpr StringLiteral kShouldRemoveAttrs[] = {"operandSegmentSizes",
+                                                    "res_attrs", "arg_attrs"};
+    for (auto attr : kShouldRemoveAttrs) {
+      attrs.erase(attr);
+    }
+    newMatmul->setAttrs(attrs);
+    if (splitInfo.outerOutValue == matmulOp.getResult(0)) {
+      splitInfo.outerOutValue = newMatmul.getResult(0);
+    }
+    rewriter.replaceOp(matmulOp, newMatmul);
+  }
+
+  auto newOutValue = splitInfo.outerOutValue;
 
   // [Step 3] Create add: add(new_matmul_result, outs_value)
   // This is the "c" in a*b+c, added after the matmul result
   rewriter.setInsertionPointAfterValue(splitInfo.outerOutValue);
+
+  constexpr size_t kMaxPreservedUsers = 2;
+  SmallPtrSet<Operation *, kMaxPreservedUsers> preservedUsers;
+  if (splitInfo.mayNotExec && forOp) {
+    auto lb = forOp.getLowerBound();
+    auto ub = forOp.getUpperBound();
+
+    Value executed =
+        rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, ub, lb);
+    Value zeroValue;
+    if (auto floatType = dyn_cast<FloatType>(elmType)) {
+      APFloat zeroAPFloat = APFloat::getZero(floatType.getFloatSemantics());
+      zeroValue =
+          rewriter.create<arith::ConstantFloatOp>(loc, floatType, zeroAPFloat)
+              .getResult();
+    } else if (auto intType = dyn_cast<IntegerType>(elmType)) {
+      zeroValue =
+          rewriter.create<arith::ConstantIntOp>(loc, intType, 0).getResult();
+    }
+    auto fillOp = rewriter.create<linalg::FillOp>(loc, zeroValue,
+                                                  splitInfo.outerOutValue);
+    auto selectOp = rewriter.create<arith::SelectOp>(
+        loc, executed, splitInfo.outerOutValue, fillOp.getResult(0));
+    newOutValue = selectOp.getResult();
+    preservedUsers.insert(selectOp);
+    preservedUsers.insert(fillOp);
+    forOp->setAttr(CVPipeline::kHIVMMatmulLimitedInCubeAttr,
+                   rewriter.getUnitAttr());
+  }
+
   Operation *addOp;
   if (isa<FloatType>(elmType)) {
-    addOp = rewriter
-                .create<arith::AddFOp>(loc, splitInfo.outerOutValue,
-                                       splitInfo.outerInValue)
-                .getOperation();
+    addOp =
+        rewriter.create<arith::AddFOp>(loc, newOutValue, splitInfo.outerInValue)
+            .getOperation();
   } else {
-    addOp = rewriter
-                .create<arith::AddIOp>(loc, splitInfo.outerOutValue,
-                                       splitInfo.outerInValue)
-                .getOperation();
+    addOp =
+        rewriter.create<arith::AddIOp>(loc, newOutValue, splitInfo.outerInValue)
+            .getOperation();
+  }
+  if (preservedUsers.empty()) {
+    preservedUsers.insert(addOp);
   }
   addOp->setAttr(CVPipeline::kAddFromMatmul, rewriter.getUnitAttr());
   splitInfo.outerOutValue.replaceUsesWithIf(
-      addOp->getResult(0),
-      [&](OpOperand &opop) { return opop.getOwner() != addOp; });
+      addOp->getResult(0), [&](OpOperand &operand) {
+        return !preservedUsers.contains(operand.getOwner());
+      });
 
-  rewriter.replaceOp(matmulOp, newMatmul);
+  return success();
 }
 
 LogicalResult
 SplitMatmulPattern::matchAndRewrite(linalg::MatmulOp matmulOp,
                                     PatternRewriter &rewriter) const {
+  if (CVPipeline::hasFallbackAttr(matmulOp->getParentOfType<ModuleOp>())) {
+    return failure();
+  }
+
   LOG_DEBUG("check matmulOp = " << matmulOp);
   auto splitInfoOpt = shouldSplit(matmulOp, needSplitAll);
   if (!splitInfoOpt.has_value()) {
@@ -659,12 +758,24 @@ SplitMatmulPattern::matchAndRewrite(linalg::MatmulOp matmulOp,
   LOG_DEBUG("-------------------");
   matmulOp->setAttr(CVPipeline::kLoopCarriedL0C, rewriter.getUnitAttr());
 
-  if (splitInfo.mayNotExec) {
-    matmulOp->setAttr(CVPipeline::kMayNotExec, rewriter.getUnitAttr());
+  if (auto markOpOpt = utils::getAnnotateOpWithAttr(splitInfo.outerOutValue,
+                                                    kMatmulAtLeastOnceHint);
+      markOpOpt.has_value()) {
+    auto markOp = markOpOpt.value();
+    markOp->removeAttr(kMatmulAtLeastOnceHint);
+    if (markOp->getAttrs().empty()) {
+      rewriter.eraseOp(markOpOpt.value());
+    }
+    matmulOp->getParentOp()->setAttr(CVPipeline::kHIVMMatmulLimitedInCubeAttr,
+                                     rewriter.getUnitAttr());
   }
 
   if (splitInfo.shouldSplit) {
-    splitMatmul(matmulOp, rewriter, splitInfo);
+    return splitMatmul(matmulOp, rewriter, splitInfo);
+  }
+
+  if (splitInfo.mayNotExec) {
+    matmulOp->setAttr(CVPipeline::kMayNotExec, rewriter.getUnitAttr());
   }
 
   return success();

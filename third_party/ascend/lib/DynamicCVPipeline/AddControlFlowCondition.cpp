@@ -28,6 +28,7 @@
 #include "ascend/include/DynamicCVPipeline/AddControlFlowCondition/UpdateConditionInfo.h"
 #include "ascend/include/DynamicCVPipeline/AddControlFlowCondition/UpdateForOps.h"
 #include "ascend/include/DynamicCVPipeline/AddControlFlowCondition/UpdateLoopIterTimes.h"
+#include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "mlir/Pass/PassManager.h"
@@ -64,6 +65,10 @@ static LogicalResult verifyControlFlowPrerequisites(ModuleOp module) {
 void AddControlFlowConditionPass::runOnOperation() {
   ModuleOp module = getOperation();
 
+  if (CVPipeline::hasFallbackAttr(module)) {
+    return;
+  }
+
   LDBG("Enter add controlflow condition pass.\n");
   LDBG("before AddControlFlowCondition:");
   LLVM_DEBUG(module.dump());
@@ -79,22 +84,23 @@ void AddControlFlowConditionPass::runOnOperation() {
   // ops without sharing
   pm.addPass(createCloneOpsPass());
 
-  // Step1: Initialize crossCoreDependentMap and intraCoreDependentMap
-  std::unique_ptr<InitDependentMapPass> initDependentMapPass(
-      new InitDependentMapPass());
-  initDependentMapPass->setConditionInfo(&info);
-  pm.addPass(std::move(initDependentMapPass));
-
-  // Step2: Process shared iter_args in for ops to eliminate arg sharing across
+  // Step1: Process shared iter_args in for ops to eliminate arg sharing across
   // block_ids
   std::unique_ptr<ProcessArgsPass> processArgsPass(new ProcessArgsPass());
   processArgsPass->setConditionInfo(&info);
   pm.addPass(std::move(processArgsPass));
 
-  // Step3: Create if ops based on block_id
+  // Step2: Create if ops based on block_id
   std::unique_ptr<CreateIfOpsPass> createIfOpsPass(new CreateIfOpsPass());
   createIfOpsPass->setConditionInfo(&info);
   pm.addPass(std::move(createIfOpsPass));
+
+  // Step3: Initialize crossCoreDependentMap, intraCoreDependentMap, and build
+  // if block DAG
+  std::unique_ptr<InitDependentMapPass> initDependentMapPass(
+      new InitDependentMapPass());
+  initDependentMapPass->setConditionInfo(&info);
+  pm.addPass(std::move(initDependentMapPass));
 
   // Step4: Update for ops with block counters and inner dependency conditions,
   // and insert PIPE_S inter-core synchronization
@@ -116,7 +122,9 @@ void AddControlFlowConditionPass::runOnOperation() {
 
   if (failed(runPipeline(pm, module))) {
     LDBG("Pass failed!");
-    signalPassFailure();
+    if (!CVPipeline::hasFallbackAttr(module)) {
+      CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
+    }
   }
 
   LDBG("Exit add controlflow condition pass.");

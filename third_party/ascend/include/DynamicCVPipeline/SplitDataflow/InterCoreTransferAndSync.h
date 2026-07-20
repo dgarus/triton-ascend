@@ -122,6 +122,7 @@ private:
                                         SmallVector<int64_t> &expectedShape,
                                         bool isMatmulA, bool isMatmulB,
                                         bool isOnlyDepInMatmul);
+  bool matmulCIsEmpty(mlir::Value acc);
   void padMatmulInnerDim(OpBuilder &builder, Operation *matmulOp, Location loc,
                          int matmulIndex, int matmulOpBlockId);
   void extractMatmulResult(
@@ -171,12 +172,11 @@ private:
       mlir::Operation *cubeStartOp, mlir::Location loc, int transferIndex,
       int iniConsumerId, bool isScaler,
       mlir::Operation **consumedDataOp = nullptr);
-  mlir::Operation *
-  insertCubeToVectorTransfer(mlir::OpBuilder &builder, mlir::Value srcValue,
-                             mlir::Operation *cubeEndOp,
-                             mlir::Operation *vectorStartOp, mlir::Location loc,
-                             int transferIndex, int iniConsumerId,
-                             mlir::Operation **consumedDataOp = nullptr);
+  mlir::Operation *insertCubeToVectorTransfer(
+      mlir::OpBuilder &builder, mlir::Value srcValue,
+      mlir::Operation *cubeEndOp, mlir::Operation *vectorStartOp,
+      mlir::Location loc, int transferIndex, int iniConsumerId,
+      bool isAllTranspoesd, mlir::Operation **consumedDataOp = nullptr);
   TransferPipeConfig getTransferPipeConfig(Operation *transferOp);
   void insertInterCoreSync(mlir::OpBuilder &builder,
                            mlir::Operation *transferOp,

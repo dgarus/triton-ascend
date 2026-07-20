@@ -37,7 +37,7 @@ using namespace triton;
 void DecoupleComputeAndMemoryPass::runOnOperation() {
   ModuleOp module = getOperation();
 
-  int depth = BufferCountManager::getInstance().getBufferCountByType(
+  int depth = BufferCountManager(module).getBufferCountByType(
       BufferCountManager::DepType::LoadStore);
 
   if (depth <= 1) {
@@ -56,7 +56,7 @@ void DecoupleComputeAndMemoryPass::runOnOperation() {
 
   if (failed(runPipeline(pm, module))) {
     module->emitError() << "[" << DEBUG_TYPE << "] Pass failed!";
-    signalPassFailure();
+    CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
   }
 
   LDBG("Process successfully");
